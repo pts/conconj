@@ -5,10 +5,12 @@
 #
 # TODO(pts): sudo apt-get install -y systemd-container  # For systemd-nspawn.
 # TODO(pts): sudo apt-get install -y ip  # For iproute2.
-# !! TODO(pts): timezone
+# TODO(pts): systemd-nspawn --notify-ready=
+# !! TODO(pts): The --bind /shared directory.
+# !! TODO(pts): timezone -- which packages are needed?
 # !! TODO(pts): /etc/default/locale ?
-# !! TODO(pts): Add "$HOSTNETIP host" to /etc/hosts
-# !! TODO(pts): Use DNS resolver on the host? Unfortunately, it's not listening:
+# !! TODO(pts): Add "$HOSTNETIP host" to /etc/hosts , also copy from/to host /etc/hosts
+# !! TODO(pts): Use DNS resolver on the host? Unfortunately, systemd-resolved is not listening:
 #               `nc -v 192.168.0.90 53': nc: connect to 192.168.0.90 port 53 (tcp) failed: Connection refused
 #
 
@@ -53,14 +55,17 @@ fi
 NETDEV="$(ip -o addr | perl -we 'use integer; use strict;
     die "fatal: bad hostnetip: $ARGV[0]" if $ARGV[0] !~ m@\A(\d+)[.](\d+)[.](\d+)[.](\d+)(?:/32)?\Z(?!\n)@;
     my $hostnetip = unpack("N", pack("C4", $1, $2, $3, $4));
-    my $netdev;
+    my $netdev; my $netmaskbits;
     while (<STDIN>) { chomp; my @l = split; if (@l > 3 and $l[2] eq "inet" and $l[1] ne "lo" and $l[3] =~ m@\A(\d+)[.](\d+)[.](\d+)[.](\d+)/(\d+)\Z(?!\n)@ and $5 != 32 and $5 >= 8 and $5 <= 32) {
       my $ip = unpack("N", pack("C4", $1, $2, $3, $4)); my $mask = unpack("N", pack("N", -1 << (32 - $5))); if (($ip & $mask) == ($hostnetip & $mask)) {
         die "fatal: multiple network devices for hostnetip: $ARGV[0]\n" if defined($netdev);
-        $netdev = $l[1]; } } }
+        $netdev = $l[1]; $netmaskbits = $5; } } }
     die "fatal: missing network device for hostnetip: $ARGV[0]\n" if !defined($netdev);
-    print "$netdev\n"' -- "$HOSTNETIP")"
+    print "$netdev $netmaskbits\n"' -- "$HOSTNETIP")"
+NETMASKBITS="${NETDEV#* }"
+NETDEV="${NETDEV%% *}"
 test "$NETDEV" || exit 2
+test "$NETMASKBITS" || exit 2
 
 UR=
 read UR </proc/sys/kernel/osrelease  # It's OK to fail.
@@ -106,51 +111,41 @@ if ! ip link show hostnet >/dev/null 2>&1; then
   ip link set hostnet up || exit 2  # `ip route add' below needs it.
 fi
 
-GUESTIP=
-read GUESTIP <"$CONAME".container/ipaddr 2>/dev/null ||:
-
 GUESTNETNS=guest."$CONAME"
 #ip netns del "$GUESTNETNS" && sleep .5 ||:
 if ! (ip netns list | while read A B; do test "$A" = "$GUESTNETNS" && exit 0; done); then
   # Network namespace $GUESTNETNS doesn't exist, create it.
   ip netns add "$GUESTNETNS" || exit 2
   ip -n "$GUESTNETNS" link set lo up || exit 2
+  # Needed by Docker.
+  echo 1 | ip netns exec guest.co92 tee /proc/sys/net/ipv4/ip_forward >/dev/null || exit 2
 fi
+
+GUESTIP=
+read GUESTIP <"$CONAME".container/ipaddr 2>/dev/null ||:
 
 ip link del "$GUESTNETNS"in 2>/dev/null ||:
 ip -n "$GUESTNETNS" link del "$GUESTNETNS"in 2>/dev/null ||:
 if test "$GUESTIP"; then
-  NETMASKBITS=24  # !!
-  echo a1
   ip link add link "$NETDEV" name "$GUESTNETNS"in type ipvlan mode l2 || exit 2
-  echo a1b
   ip link set "$GUESTNETNS"in netns "$GUESTNETNS" || exit 2
-  echo a2
-  #ip -n "$GUESTNETNS" link set "$GUESTNETNS"in down || exit 2  # Doesn't remove IP addresses.
-  #ip -n "$GUESTNETNS" addr flush dev "$GUESTNETNS"in || exit 2
-  #ip -n "$GUESTNETNS" route del default 2>/dev/null ||:
-  #ip -o -n "$GUESTNETNS" addr show "$GUESTNETNS"in; while read A B C D E; do
-  #  if test "$3" = inet && test "${4%/*}" = "$GUESTIP"; then
-  #    ip -n "$GUESTNETNS" ip addr del "$GUESTIP/$NETMASKBITS" dev "$GUESTNETNS"in || exit 2
-  #  fi
-  #done
-  echo a3
   ip -n "$GUESTNETNS" addr add "$GUESTIP/$NETMASKBITS" brd + dev "$GUESTNETNS"in || exit 2
-  echo a4
   ip -n "$GUESTNETNS" link set "$GUESTNETNS"in up || exit 2
-  echo a5
   ip -n "$GUESTNETNS" route add default via 192.168.0.1 || exit 2
-  echo a6
   test "$(ip route show "$GUESTIP"/32)" && ip route del "$GUESTIP"/32
   ip route add "$GUESTIP"/32 dev hostnet || exit 2
 fi
 
-echo qqqq; exit
-
-# Seems to be starting in the background.
 exec 9>"$CONAME".container/console.out.tmp </dev/null
+# Docker needs --capability=CAP_SYS_MODULE,CAP_NET_ADMIN
+# Docker needs --bind /proc/sys/net/ipv4 for .../ip_forward
+#   SUXX: no effect, mounted before /proc/sys
+#   --bind /proc/sys/net/ipv4 \
+# SUXX: echo 1 >/proc/sys/net/ipv4/ip_forward ||:  # For Docker.
 systemd-nspawn --boot --directory "$CONAME".container/rootfs \
-    $BM --network-namespace-path /var/run/netns/net92 \
+    $BM --network-namespace-path /var/run/netns/guest."$CONAME" \
+    --capability=CAP_SYS_MODULE,CAP_NET_ADMIN \
+    --bind=/sys/fs/cgroup \
     --machine "$CONAME" >&9 2>&9 &
 exec 9>&1
 while ! read LINE <"$CONAME".container/console.out.tmp; do :; done
@@ -178,6 +173,7 @@ fi
 mv "$CONAME".container/console.out.tmp "$CONAME".container/console.out
 
 # Perhaps it's too early (race condition) for poweroff or shell now.
-echo "info: started; shoutdown gracefully: sudo machinectl poweroff $CONAME" >&2
+echo "info: started; shutdown gracefully: sudo machinectl poweroff $CONAME" >&2
+echo "info: view console: less '$CODIR/$CONAME.container/console.out'" >&2
 echo "info: root shell: sudo machinectl shell $CONAME" >&2
 exit 0
