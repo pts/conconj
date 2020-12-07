@@ -38,7 +38,7 @@ case "$CONAME" in
  *[^-_a-zA-Z0-9]* | "") echo "fatal: bad container name: $CONAME"; exit 1 ;;
 esac
 
-if machinectl show "$CONAME" 2>/dev/null; then  # Early exit.
+if machinectl show "$CONAME" 2>/dev/null >&2; then  # Early exit.
   echo "fatal: container already running: $CONAME" >&2
   exit 2
 fi
@@ -142,10 +142,20 @@ exec 9>"$CONAME".container/console.out.tmp </dev/null
 #   SUXX: no effect, mounted before /proc/sys
 #   --bind /proc/sys/net/ipv4 \
 # SUXX: echo 1 >/proc/sys/net/ipv4/ip_forward ||:  # For Docker.
+#    without export SYSTEMD_NSPAWN_USE_CGNS=0  # Needed by Docker.
+#    --bind=/sys/fs/cgroup \
+#    --bind=/sys/fs/cgroup --system-call-filter='add_key keyctl' \
+#    --bind=/sys/fs/cgroup --system-call-filter='add_key keyctl' --private-users=no \
+        # Failed to create /init.scope control group: No such file or directory
+        # Failed to allocate manager object: No such file or directory
+        # [!!!!!!] Failed to allocate manager object, freezing.
+        # Freezing execution.
+#    --capability=CAP_SYS_MODULE,CAP_NET_ADMIN \
+export SYSTEMD_NSPAWN_USE_CGNS=0  # Needed by Docker.
 systemd-nspawn --boot --directory "$CONAME".container/rootfs \
     $BM --network-namespace-path /var/run/netns/guest."$CONAME" \
-    --capability=CAP_SYS_MODULE,CAP_NET_ADMIN \
-    --bind=/sys/fs/cgroup \
+    --capability=all \
+    --bind=/sys/fs/cgroup --system-call-filter='add_key keyctl' --private-users=no \
     --machine "$CONAME" >&9 2>&9 &
 exec 9>&1
 while ! read LINE <"$CONAME".container/console.out.tmp; do :; done
@@ -176,4 +186,6 @@ mv "$CONAME".container/console.out.tmp "$CONAME".container/console.out
 echo "info: started; shutdown gracefully: sudo machinectl poweroff $CONAME" >&2
 echo "info: view console: less '$CODIR/$CONAME.container/console.out'" >&2
 echo "info: root shell: sudo machinectl shell $CONAME" >&2
+# force kill systemd: machinectl kill co92 -s 9
+
 exit 0
