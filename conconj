@@ -151,12 +151,13 @@ exec 9>"$CONAME".container/console.out.tmp </dev/null
         # [!!!!!!] Failed to allocate manager object, freezing.
         # Freezing execution.
 #    --capability=CAP_SYS_MODULE,CAP_NET_ADMIN \
+#    --capability=all \
 export SYSTEMD_NSPAWN_USE_CGNS=0  # Needed by Docker.
-systemd-nspawn --boot --directory "$CONAME".container/rootfs \
-    $BM --network-namespace-path /var/run/netns/guest."$CONAME" \
-    --capability=all \
-    --bind=/sys/fs/cgroup --system-call-filter='add_key keyctl' --private-users=no \
-    --machine "$CONAME" >&9 2>&9 &
+systemd-nspawn --boot --directory="$CONAME".container/rootfs \
+    $BM --network-namespace-path=/var/run/netns/guest."$CONAME" \
+    --capability=CAP_SYS_MODULE,CAP_NET_ADMIN \
+    --bind=/sys/fs/cgroup --system-call-filter='add_key keyctl' \
+    --machine="$CONAME" >&9 2>&9 &
 exec 9>&1
 while ! read LINE <"$CONAME".container/console.out.tmp; do :; done
 E=
