@@ -6,7 +6,7 @@
 # TODO(pts): sudo apt-get install -y systemd-container  # For systemd-nspawn.
 # TODO(pts): sudo apt-get install -y ip  # For iproute2.
 # TODO(pts): systemd-nspawn --notify-ready=
-# !! why needed after: apt-get install docker? systemctl start docker
+# !! TODO(pts): why needed after: apt-get install docker? systemctl start docker; also for openssh-server
 # !! TODO(pts): The --bind /shared directory.
 # !! TODO(pts): timezone -- which packages are needed?
 # !! TODO(pts): /etc/default/locale ?
@@ -15,32 +15,58 @@
 #               `nc -v 192.168.0.90 53': nc: connect to 192.168.0.90 port 53 (tcp) failed: Connection refused
 #
 
-if test -z "$RUNN_RERUN"; then
+if test -z "$RUNN_RERUN" && ! (test $# = 0 || test "$1" = --help); then
   unset S
   test "$(id -u)" != 0 && S='sudo --'
-  exec $S /usr/bin/env -i TZ="$TZ" RUNN_RERUN=1 /bin/sh "$0" "$@"
+  exec $S /usr/bin/env -i TZ="$TZ" TERM="$TERM" RUNN_RERUN=1 /bin/sh "$0" "$@"
   exit 1
 fi
 
-if test $# != 1 || test "$1" = "--help"; then
-  echo "Usage: $0 <container-name>" >&2
-  exit 1
+CMD=
+if test "$1" = start || test "$1" = shell || test "$1" = poweroff || test "$1" = kill || test "$1" = show; then
+  if test $# != 1; then
+    CMD="$1"; CONAME="$2"; shift; shift
+  fi
+elif test $# = 1 && test "${1#-}" = "$1"; then
+  CMD=start; CONAME="$1"; shift
 fi
-CODIR="${0%/*}"
-cd "$CODIR" || exit 2
-LINE=
-
-CONAME="$1"
-if ! test -d "$CONAME.container/rootfs"; then
-  echo "fatal: missing rootfs directory: $CODIR/$CONAME.container/rootfs"
-  exit 2
+if test "$CMD" = start || test "$CMD" = shell || test "$CMD" = poweroff || test "$CMD" = show; then
+  test $# != 0 && CMD=  # Too many command-line arguments.
+fi
+if ! test "$CMD"; then
+  echo "\
+Usage: $0 [start] <container-name>
+       $0 shell <container-name>
+       $0 show <container-name>
+       $0 poweroff <container-name>  # Gracefully, don't wait.
+       $0 kill <container-name> [<arg> ...]" >&2
+  exit 1
 fi
 case "$CONAME" in
- *[^-._a-zA-Z0-9]* | "") echo "fatal: bad container name: $CONAME"; exit 1 ;;
+ -* | *[^-._a-zA-Z0-9]* | "") echo "fatal: bad container name: $CONAME"; exit 1 ;;
 esac
 
-if machinectl show "$CONAME" 2>/dev/null >&2; then  # Early exit.
-  echo "fatal: container already running: $CONAME" >&2
+CODIR="${0%/*}"
+cd "$CODIR" || exit 2
+
+if test "$CMD" = start || test "$CMD" = shell; then
+  if machinectl show "$CONAME" 2>/dev/null >&2; then  # Early exit.
+    if test "$CMD" = start; then
+      echo "fatal: container already running: $CONAME" >&2
+      exit 2
+    fi
+  elif test "$CMD" = shell; then
+    CMD=start-shell
+  fi
+fi
+if test "$CMD" != start && test "$CMD" != start-shell; then
+  exec machinectl "$CMD" "$CONAME" "$@"
+  echo "fatal: command not found: machinectl" >&2
+  exit 2
+fi
+
+if ! test -d "$CONAME.container/rootfs"; then
+  echo "fatal: missing rootfs directory: $CODIR/$CONAME.container/rootfs"
   exit 2
 fi
 
@@ -68,6 +94,12 @@ NETDEV="${NETDEV%% *}"
 test "$NETDEV" || exit 2
 test "$NETMASKBITS" || exit 2
 
+NETGATEWAY="$(ip route | while read A B C D; do test "$A" = default && test "$B" = via && echo "$C" && break; done)"
+if test -z "$NETGATEWAY"; then
+  echo "fatal: missing default gateway" >&2
+  exit 2
+fi
+
 UR=
 read UR </proc/sys/kernel/osrelease  # It's OK to fail.
 if test "$UR" && test -d /lib/modules/"$UR"; then
@@ -78,26 +110,78 @@ else
 fi
 
 ISSR=
-while read LINE; do
- case "$LINE" in
-  nameserver\ 127.0.0.53) ISSR=1   # systemd-resolved.
- esac
-done <"$CONAME".container/rootfs/etc/resolv.conf
-#echo "$ISSR"
-#exit
-# $ sudo ls -l co20.04.container/rootfs/etc/resolv.conf
-# lrwxrwxrwx 1 root root 39 Dec  7 20:03 co20.04.container/rootfs/etc/resolv.conf -> ../run/systemd/resolve/stub-resolv.conf
-ISSR=1  # !!
+while read A B C; do
+  test "$A" = nameserver && test "$B" = 127.0.0.53 && ISSR=1 && break  # systemd-resolved.
+done </etc/resolv.conf
 if test "$ISSR"; then
   LINE="$(systemd-resolve --status "$NETDEV")"  # Network interface.
   case "$LINE" in
    *DNS\ Servers:\ *) ISSR=2 ;;
   esac
+else
+  LINE="$(cat /etc/resolv.conf)"
 fi
-if test "$ISSR" = 2 && test -f "$CONAME".container/rootfs/etc/systemd/resolved.conf; then
-  # Copy over host systemd-resolved config to container.
-  echo "$LINE" | perl -ni -we 'use integer; use strict; our %conf; our %confhad; BEGIN { $conf{DNS} = ""; $conf{MulticastDNS} = "no"; $conf{DNSSEC} = "no"; $conf{LLMNR} = "no"; my $key = ""; while (<STDIN>) { s@^\s+@@; if (s@(.*?): @@) { $key = $1 } chomp; if ($key eq "DNS Servers") { $conf{DNS} .= " " if length($conf{DNS}); $conf{DNS} .= $_; } elsif ($key =~ m@^(\S+) setting$@ and exists($conf{$1})) { $conf{$1} = $_ } }; $conf{LLMNR} = "no" } $_ .= "\n" if !m@\n@; if (m@^#?([^\s#=]+)=@ and exists($conf{$1})) { print "$1=$conf{$1}\n"; $confhad{$1} = 1 } else { print } END { for (sort(keys(%conf))) { print "$_=$conf{$_}\n" if !exists($confhad{$_}) } }' "$CONAME".container/rootfs/etc/systemd/resolved.conf || exit 2
-  # TODO(pts): Fix non-systemd `nameserver' also in /etc/resolv.conf
+# Now "$LINE" contains the DNS configuration of the host.
+# TODO(pts): Add a config option to keep it unmodified.
+
+# Example: ../run/systemd/resolve/stub-resolv.conf
+RCL="$(readlink "$CONAME".container/rootfs/etc/resolv.conf)"
+if test "$RCL"; then
+  A=; case "$RCL" in ../*) A="${RCL#*/}" ;; esac
+  test "$A" && case "$A/" in */../*) A="" ;; esac  # Safety.
+  case "$A" in run/systemd/resolve/*) test -d "$CONAME".container/rootfs/run/systemd/resolve || mkdir -p "$CONAME".container/rootfs/run/systemd/resolve || exit 2; RCL= ;; esac
+fi
+
+
+if ! test "$RCL"; then  # Container /etc/resolv.conf is not a symlink or it is a systemd symlink.
+  # !! (237, hard) TODO(pts): Make systemd-nspawn.c not bind-mount something over it. Only newer versions have flag `systemd-nspawn --resolv-conf-mode=...`. Workaround: umount /etc/resolv.conf
+  : >>"$CONAME".container/rootfs/etc/resolv.conf  # Create it if needed.
+  # Copy over host resolve config to container /etc/resolv.conf.
+  echo "$LINE" | perl -ni -0777 -we '
+      use integer; use strict; our %conf; our %confhad;
+      BEGIN {
+        $conf{DNS} = ""; $conf{MulticastDNS} = "no"; $conf{DNSSEC} = "no"; $conf{LLMNR} = "no"; my $key = "";
+        local $/ = "\n";
+        while (<STDIN>) {
+          s@^\s+@@;
+          if (s@(.*?): @@) { $key = $1 } elsif (s@^nameserver\s+@@) { $key = "DNS Servers" }
+          chomp; next if !length or m@^#@;
+          if ($key eq "DNS Servers") { $conf{DNS} .= " " if length($conf{DNS}); $conf{DNS} .= $_; } elsif ($key =~ m@^(\S+) setting$@ and exists($conf{$1})) { $conf{$1} = $_ }
+        }
+        $conf{LLMNR} = "no";
+      }
+      my $infile = $_;
+      while ($infile =~ m@\G(\n|.+\n?)@gc) {
+        $_ = $1;
+        $_ .= "\n" if !m@\n@; if (m@^nameserver\s+@ and exists($conf{DNS})) { if (!exists($confhad{DNS})) { for my $dns (split(/ /, $conf{DNS})) { print "nameserver $dns\n" } $confhad{DNS} = 1 } } else { print }
+      }
+      if (exists($conf{DNS}) and !exists($confhad{DNS})) { for my $dns (split(/ /, $conf{DNS})) { print "nameserver $dns\n" } }
+  ' "$CONAME".container/rootfs/etc/resolv.conf || exit 2
+fi
+
+# TODO(pts): Security: don't follow symlinks.
+if test -f "$CONAME".container/rootfs/etc/systemd/resolved.conf; then
+  # Copy over host resolve config to container /etc/systemd/resolved.conf.
+  echo "$LINE" | perl -ni -0777 -we '
+      use integer; use strict; our %conf; our %confhad;
+      BEGIN {
+        $conf{DNS} = ""; $conf{MulticastDNS} = "no"; $conf{DNSSEC} = "no"; $conf{LLMNR} = "no"; my $key = "";
+        local $/ = "\n";
+        while (<STDIN>) {
+          s@^\s+@@;
+          if (s@(.*?): @@) { $key = $1 } elsif (s@^nameserver\s+@@) { $key = "DNS Servers" }
+          chomp; next if !length or m@^#@;
+          if ($key eq "DNS Servers") { $conf{DNS} .= " " if length($conf{DNS}); $conf{DNS} .= $_; } elsif ($key =~ m@^(\S+) setting$@ and exists($conf{$1})) { $conf{$1} = $_ }
+        }
+        $conf{LLMNR} = "no";
+      }
+      my $infile = $_;
+      while ($infile =~ m@\G(\n|.+\n?)@gc) {
+        $_ = $1;
+        $_ .= "\n" if !m@\n@; if (m@^#?([^\s#=]+)=@ and exists($conf{$1})) { print "$1=$conf{$1}\n"; $confhad{$1} = 1 } else { print }
+      }
+      for (sort(keys(%conf))) { print "$_=$conf{$_}\n" if !exists($confhad{$_}) }
+  ' "$CONAME".container/rootfs/etc/systemd/resolved.conf || exit 2
 fi
 
 (ip -o addr show hostnet 2>/dev/null | while read A B C D E; do
@@ -119,12 +203,12 @@ fi
 
 GUESTNETNS=guest."$CONAME"
 #ip netns del "$GUESTNETNS" && sleep .5 ||:
-if ! (ip netns list | while read A B; do test "$A" = "$GUESTNETNS" && exit 0; done); then
+if (ip netns list | while read A B; do test "$A" = "$GUESTNETNS" && exit 2; done; test $? = 2 && exit 2; exit 0); then
   # Network namespace $GUESTNETNS doesn't exist, create it.
   ip netns add "$GUESTNETNS" || exit 2
   ip -n "$GUESTNETNS" link set lo up || exit 2
   # Needed by Docker.
-  echo 1 | ip netns exec guest.co92 tee /proc/sys/net/ipv4/ip_forward >/dev/null || exit 2
+  echo 1 | ip netns exec "$GUESTNETNS" tee /proc/sys/net/ipv4/ip_forward >/dev/null || exit 2
 fi
 
 GUESTIP=
@@ -133,18 +217,30 @@ read GUESTIP <"$CONAME".container/ipaddr 2>/dev/null ||:
 ip link del "$GUESTNETNS"in 2>/dev/null ||:
 ip -n "$GUESTNETNS" link del "$GUESTNETNS"in 2>/dev/null ||:
 if test "$GUESTIP"; then
+  # TODO(pts): If everything is all right, don't make any changes, so that
+  # currently running shells would continue working.
   ip link add link "$NETDEV" name "$GUESTNETNS"in type ipvlan mode l2 || exit 2
   ip link set "$GUESTNETNS"in netns "$GUESTNETNS" || exit 2
   ip -n "$GUESTNETNS" addr add "$GUESTIP/$NETMASKBITS" brd + dev "$GUESTNETNS"in || exit 2
   ip -n "$GUESTNETNS" link set "$GUESTNETNS"in up || exit 2
-  ip -n "$GUESTNETNS" route add default via 192.168.0.1 || exit 2
+  ip -n "$GUESTNETNS" route add default via "$NETGATEWAY" || exit 2
   test "$(ip route show "$GUESTIP"/32)" && ip route del "$GUESTIP"/32
   ip route add "$GUESTIP"/32 dev hostnet || exit 2
+fi
+
+if test "$CMD" = start-shell; then
+  exec systemd-nspawn --directory="$CONAME".container/rootfs \
+      $BM --network-namespace-path=/var/run/netns/"$GUESTNETNS" \
+      --machine="$CONAME" \
+      ;
+  echo "$0: command not found: systemd-nspawn" >&2
+  exit 2
 fi
 
 exec 9>"$CONAME".container/console.out.tmp </dev/null
 # Docker needs --capability=CAP_SYS_MODULE,CAP_NET_ADMIN
 # Docker needs --bind /proc/sys/net/ipv4 for .../ip_forward
+# TODO(pts): Enable starting without Docker.
 #   SUXX: no effect, mounted before /proc/sys
 #   --bind /proc/sys/net/ipv4 \
 # SUXX: echo 1 >/proc/sys/net/ipv4/ip_forward ||:  # For Docker.
@@ -160,7 +256,7 @@ exec 9>"$CONAME".container/console.out.tmp </dev/null
 #    --capability=all \
 export SYSTEMD_NSPAWN_USE_CGNS=0  # Needed by Docker.
 systemd-nspawn --boot --directory="$CONAME".container/rootfs \
-    $BM --network-namespace-path=/var/run/netns/guest."$CONAME" \
+    $BM --network-namespace-path=/var/run/netns/"$GUESTNETNS" \
     --capability=CAP_SYS_MODULE,CAP_NET_ADMIN \
     --bind=/sys/fs/cgroup --system-call-filter='add_key keyctl' \
     --machine="$CONAME" >&9 2>&9 &
