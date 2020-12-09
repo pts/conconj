@@ -301,6 +301,8 @@ if test "$GUESTIP"; then
   ip route add "$GUESTIP"/32 dev hostnet || exit 2
 fi
 
+chown 0.0 "$CONAME".container/rootfs || exit 2
+
 if test "$CMD" = start-shell; then
   exec systemd-nspawn --directory="$CONAME".container/rootfs \
       $BM --network-namespace-path=/var/run/netns/"$GUESTNETNS" \
