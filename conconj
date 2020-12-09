@@ -4,15 +4,14 @@
 # Tested on host system: Ubuntu 18.04.
 #
 # TODO(pts): sudo apt-get install -y systemd-container  # For systemd-nspawn.
-# TODO(pts): sudo apt-get install -y ip  # For iproute2.
+# TODO(pts): sudo apt-get install -y iproute2  # For ip.
 # TODO(pts): systemd-nspawn --notify-ready=
 # !! TODO(pts): why needed after: apt-get install docker? systemctl start docker; also for openssh-server
 # !! TODO(pts): The --bind /shared directory.
 # !! TODO(pts): timezone -- which packages are needed?
 # !! TODO(pts): /etc/default/locale ?
 # !! TODO(pts): Add "$HOSTNETIP host" to /etc/hosts , also copy from/to host /etc/hosts
-# !! TODO(pts): Use DNS resolver on the host? Unfortunately, systemd-resolved is not listening:
-#               `nc -v 192.168.0.90 53': nc: connect to 192.168.0.90 port 53 (tcp) failed: Connection refused
+# !! TODO(pts): Add other type of networking: same-as-host (bind on the same port won't work), private, separate-ip (currently implemented), to-host, to-host-and-containers, host (-n, may include masquerade; only works if the container is also running systemd (because of DHCP client); no communication with other containers).
 #
 
 if test -z "$RUNN_RERUN" && ! (test $# = 0 || test "$1" = --help); then
@@ -52,6 +51,8 @@ cd "$CODIR" || exit 2
 if test "$CMD" = start || test "$CMD" = shell; then
   if machinectl show "$CONAME" 2>/dev/null >&2; then  # Early exit.
     if test "$CMD" = start; then
+      echo "info: shutdown gracefully: $0 poweroff $CONAME" >&2
+      echo "info: force kill: $0 kill $CONAME -s 9" >&2
       echo "fatal: container already running: $CONAME" >&2
       exit 2
     fi
@@ -136,7 +137,6 @@ fi
 
 
 if ! test "$RCL"; then  # Container /etc/resolv.conf is not a symlink or it is a systemd symlink.
-  # !! (237, hard) TODO(pts): Make systemd-nspawn.c not bind-mount something over it. Only newer versions have flag `systemd-nspawn --resolv-conf-mode=...`. Workaround: umount /etc/resolv.conf
   : >>"$CONAME".container/rootfs/etc/resolv.conf.container  # Create it if needed.
   # Copy over host resolve config to container /etc/resolv.conf.
   echo "$LINE" | perl -ni -0777 -we '
@@ -208,6 +208,8 @@ done) || exit 2
 # Undo incorrect setup_resolv_conf() magic in systemd-nspawn, which may
 # bind-mount or overwrite /etc/resolv.conf .
 # This affects the `start' command (--boot).
+# There is no simpler workaround for systemd-nspawn in systemd 237.
+# systemd 245.4 has systemd-nspawn --resolv-conf-mode=... to affect this.
 if test -d "$CONAME".container/rootfs/etc/systemd/system; then
   # https://www.linode.com/docs/guides/start-service-at-boot/
   echo '
@@ -331,8 +333,8 @@ esac
 #fi
 if test "$E"; then
   if test "$E" = 1; then
-    # TODO(pts): Also check it by name with a different directory.
-    echo "info: shoutdown gracefully: sudo machinectl poweroff $CONAME" >&2
+    echo "info: shotdown gracefully: $0 poweroff $CONAME" >&2
+    echo "info: force kill: $0 kill $CONAME -s 9" >&2
     echo "fatal: container already running: $CONAME" >&2
   else
     cat "$CONAME".container/console.out.tmp >&2
@@ -343,9 +345,9 @@ fi
 mv "$CONAME".container/console.out.tmp "$CONAME".container/console.out
 
 # Perhaps it's too early (race condition) for poweroff or shell now.
-echo "info: started; shutdown gracefully: sudo machinectl poweroff $CONAME" >&2
+echo "info: started; shutdown gracefully: $0 poweroff $CONAME" >&2
+echo "info: force kill: $0 kill $CONAME -s 9" >&2
 echo "info: view console: less '$CODIR/$CONAME.container/console.out'" >&2
-echo "info: root shell: sudo machinectl shell $CONAME" >&2
-# force kill systemd: machinectl kill co92 -s 9
+echo "info: root shell: $0 shell $CONAME" >&2
 
 exit 0
