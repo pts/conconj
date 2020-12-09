@@ -114,7 +114,9 @@ while read A B C; do
   test "$A" = nameserver && test "$B" = 127.0.0.53 && ISSR=1 && break  # systemd-resolved.
 done </etc/resolv.conf
 if test "$ISSR"; then
-  LINE="$(systemd-resolve --status "$NETDEV")"  # Network interface.
+  # systemd-resolve: systemd 237, Ubuntu 18.04
+  # resolvectl: systemd 245.4, Ubuntu 20.04
+  LINE="$(systemd-resolve --status "$NETDEV" 2>/dev/null || resolvectl --status "$NETDEV" 2>/dev/null)"  # Network interface.
   case "$LINE" in
    *DNS\ Servers:\ *) ISSR=2 ;;
   esac
@@ -135,7 +137,7 @@ fi
 
 if ! test "$RCL"; then  # Container /etc/resolv.conf is not a symlink or it is a systemd symlink.
   # !! (237, hard) TODO(pts): Make systemd-nspawn.c not bind-mount something over it. Only newer versions have flag `systemd-nspawn --resolv-conf-mode=...`. Workaround: umount /etc/resolv.conf
-  : >>"$CONAME".container/rootfs/etc/resolv.conf  # Create it if needed.
+  : >>"$CONAME".container/rootfs/etc/resolv.conf.container  # Create it if needed.
   # Copy over host resolve config to container /etc/resolv.conf.
   echo "$LINE" | perl -ni -0777 -we '
       use integer; use strict; our %conf; our %confhad;
@@ -156,10 +158,12 @@ if ! test "$RCL"; then  # Container /etc/resolv.conf is not a symlink or it is a
         $_ .= "\n" if !m@\n@; if (m@^nameserver\s+@ and exists($conf{DNS})) { if (!exists($confhad{DNS})) { for my $dns (split(/ /, $conf{DNS})) { print "nameserver $dns\n" } $confhad{DNS} = 1 } } else { print }
       }
       if (exists($conf{DNS}) and !exists($confhad{DNS})) { for my $dns (split(/ /, $conf{DNS})) { print "nameserver $dns\n" } }
-  ' "$CONAME".container/rootfs/etc/resolv.conf || exit 2
+  ' "$CONAME".container/rootfs/etc/resolv.conf.container || exit 2
 fi
 
 # TODO(pts): Security: don't follow symlinks.
+#
+# The file "$CONAME".container/rootfs/etc/systemd/resolved.conf is user-editable.
 if test -f "$CONAME".container/rootfs/etc/systemd/resolved.conf; then
   # Copy over host resolve config to container /etc/systemd/resolved.conf.
   echo "$LINE" | perl -ni -0777 -we '
@@ -184,12 +188,65 @@ if test -f "$CONAME".container/rootfs/etc/systemd/resolved.conf; then
   ' "$CONAME".container/rootfs/etc/systemd/resolved.conf || exit 2
 fi
 
+# Undo incorrect setup_resolv_conf() magic in systemd-nspawn, which may
+# bind-mount or overwrite /etc/resolv.conf .
+# This affects the `shell' command, which starts a login shell.
+: >>"$CONAME".container/rootfs/etc/profile || exit 2  # Create if needed.
+: >>"$CONAME".container/rootfs/etc/resolv.conf.container.start || exit 2  # Create.
+perl -pi -0777 -we '
+    my $cmd = q(if test -f /etc/resolv.conf.container.start; then umount /etc/resolv.conf 2>/dev/null; rm -f /etc/resolv.conf; cat </etc/resolv.conf.container >/etc/resolv.conf; rm -f /etc/resolv.conf.container.start; :; fi) . "\n";
+    s@\A@$cmd@ if !m@\A\Q$cmd@;
+    ' "$CONAME".container/rootfs/etc/profile || exit 2
+
 (ip -o addr show hostnet 2>/dev/null | while read A B C D E; do
   if test "$B" = hostnet && test "$C" = inet && test "$D" != "$HOSTNETIP/32"; then
     echo "fatal: device hostnet already up, with IP address ${D%/*}, should be: $HOSTNETIP" >&2
     exit 2
   fi
 done) || exit 2
+
+# Undo incorrect setup_resolv_conf() magic in systemd-nspawn, which may
+# bind-mount or overwrite /etc/resolv.conf .
+# This affects the `start' command (--boot).
+if test -d "$CONAME".container/rootfs/etc/systemd/system; then
+  # https://www.linode.com/docs/guides/start-service-at-boot/
+  echo '
+[Unit]
+Description=Set up /etc/resolv.conf in container
+DefaultDependencies=no
+Conflicts=shutdown.target
+After=systemd-resolved.service systemd-networkd.service
+Before=network.target nss-lookup.target shutdown.target
+#Wants= Requires= Requisite=qqsystemd-resolved.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh /etc/resolv.conf.container.setup
+
+[Install]
+WantedBy=multi-user.target
+' >"$CONAME".container/rootfs/etc/systemd/system/container-resolv-conf.service || exit 2
+  echo '
+if test -f /etc/resolv.conf.container.start; then
+  umount /etc/resolv.conf 2>/dev/null
+  rm -f /etc/resolv.conf
+  # /run/systemd/resolve/resolv.conf contains actual upstream nameservers.
+  if test -f /lib/systemd/resolv.conf && (systemd-resolve --status || resolvectl --status) >/dev/null 2>&1; then
+    cat </lib/systemd/resolv.conf >/etc/resolv.conf
+  else
+    cat </etc/resolv.conf.container >/etc/resolv.conf
+  fi
+  rm -f /etc/resolv.conf.container.start
+  :
+fi
+' >"$CONAME".container/rootfs/etc/resolv.conf.container.setup || exit 2
+  #chmod 755 "$CONAME".container/rootfs/etc/resolv.conf.crontainer.setup || exit 2
+  rm -f "$CONAME".container/rootfs/etc/systemd/system/multi-user.target.wants/container-resolv-conf.service || exit 2
+  # Equivalent of in-container: systemctl enable container-resolv-conf.service
+  ln -s /etc/systemd/system/container-resolv-conf.service "$CONAME".container/rootfs/etc/systemd/system/multi-user.target.wants/container-resolv-conf.service || exit 2
+  # systemctl status container-resolv-conf.service
+fi
 
 if ! ip link show hostnet >/dev/null 2>&1; then
   # https://unix.stackexchange.com/q/622914
