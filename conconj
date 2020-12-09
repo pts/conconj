@@ -13,6 +13,14 @@
 # !! TODO(pts): Add "$HOSTNETIP host" to /etc/hosts , also copy from/to host /etc/hosts
 # !! TODO(pts): Add other type of networking: same-as-host (bind on the same port won't work), private, separate-ip (currently implemented), to-host, to-host-and-containers, host (-n, may include masquerade; only works if the container is also running systemd (because of DHCP client); no communication with other containers).
 #
+# Host compatibility:
+#
+# * Ubuntu 14.04: Doesn't work, it doesn't have systemd-nspawn.
+# * Ubuntu 16.04: ??
+# * Ubuntu 18.04: Tested, it works. It has systemd 237.
+# * Ubuntu 20.04: Tested, it works.
+# * Debian 9: It has systemd 232, whose systemd-nspawn doesn't have --network-namespace-path=
+#
 
 if test -z "$RUNN_RERUN" && ! (test $# = 0 || test "$1" = --help); then
   unset S
