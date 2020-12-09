@@ -9,6 +9,7 @@
 # TODO(pts): stty \.../
 # TODO(pts): (apt-get install modprobe?) kmod-static-nodes.service: Main process exited, code=exited, status=203/EXEC
 #            [FAILED] Failed to start Create list of requ…vice nodes for the current kernel.
+# !! Rename GUEST to CON.
 # !! TODO(pts): doc: Debian: this is normal: -- make it optional
 #               Failed to mount n/a on /tmp/runc/co18.container/rootfs/sys/fs/selinux (MS_BIND ""): No such file or directory
 #               Failed to mount n/a on /tmp/runc/co18.container/rootfs/sys/fs/selinux (MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC|MS_REMOUNT|MS_BIND ""): Invalid argument
@@ -25,7 +26,7 @@
 # * Ubuntu 16.04: ??
 # * Ubuntu 18.04: Tested, it works. It has systemd 237.
 # * Ubuntu 20.04: Tested, it works.
-# * Debian 9: It has systemd 232, whose systemd-nspawn doesn't have --system-call-filter=..., so it doesn't support Docker.
+# * Debian 9: It works, with patch_nspawn.pl for systemd 232.
 # * Debian 10: It works.
 #
 
@@ -99,29 +100,32 @@ if test "$CMD" != start && test "$CMD" != start-shell; then
   echo "fatal: command not found: machinectl" >&2
   exit 2
 fi
+set x -- "$@"; shift
 
 if ! test -f "busybox.conconj" || ! test -x "busybox.conconj"; then
   echo "fatal: executable not found: $CODIR/busybox.conconj"
   exit 2
 fi
-
 if ! test -d "$CONAME.container/rootfs"; then
   echo "fatal: missing rootfs directory in container: $CODIR/$CONAME.container/rootfs"
   exit 2
 fi
-
 if ! test -f "$CONAME.container/rootfs/bin/sh"; then
   echo "fatal: missing shell in container: $CODIR/$CONAME.container/rootfs/bin/sh"
   exit 2
 fi
-
 if ! perl -e0 2>/dev/null; then
   echo "fatal: perl doesn't work" >&2
   exit 2
 fi
-
-if ! read HOSTNETIP <conconj.hostnet 2>/dev/null; then
+if ! read HOSTNETIP <conconj.hostnet 2>/dev/null; then  # !! rename
   echo "fatal: missing or empty: $CODIR/conconj.hostnet"
+  exit 2
+fi
+GUESTIP=
+read GUESTIP <"$CONAME".container/ipaddr 2>/dev/null ||:
+if test -z "$GUESTIP"; then
+  echo "fataL: missing per-container ipaddr config file: $CODIR/$CONAME.container/ipaddr" >&2
   exit 2
 fi
 
@@ -162,18 +166,22 @@ else
 fi
 
 ISSR=
-while read A B C; do
-  test "$A" = nameserver && test "$B" = 127.0.0.53 && ISSR=1 && break  # systemd-resolved.
-done </etc/resolv.conf
-if test "$ISSR"; then
-  # systemd-resolve: systemd 237, Ubuntu 18.04
-  # resolvectl: systemd 245.4, Ubuntu 20.04
-  LINE="$(systemd-resolve --status "$NETDEV" 2>/dev/null || resolvectl --status "$NETDEV" 2>/dev/null)"  # Network interface.
-  case "$LINE" in
-   *DNS\ Servers:\ *) ISSR=2 ;;
-  esac
+if test "$GUESTIP" = private; then
+  LINE=""  # No DNS servers in the container please.
 else
-  LINE="$(cat /etc/resolv.conf)"
+  while read A B C; do
+    test "$A" = nameserver && test "$B" = 127.0.0.53 && ISSR=1 && break  # systemd-resolved.
+  done </etc/resolv.conf
+  if test "$ISSR"; then
+    # systemd-resolve: systemd 237, Ubuntu 18.04
+    # resolvectl: systemd 245.4, Ubuntu 20.04
+    LINE="$(systemd-resolve --status "$NETDEV" 2>/dev/null || resolvectl --status "$NETDEV" 2>/dev/null)"  # Network interface.
+    case "$LINE" in
+     *DNS\ Servers:\ *) ISSR=2 ;;  # TODO(pts): How to use $ISSR?
+    esac
+  else
+    LINE="$(cat /etc/resolv.conf)"
+  fi
 fi
 # Now "$LINE" contains the DNS configuration of the host.
 # TODO(pts): Add a config option to keep it unmodified.
@@ -211,6 +219,8 @@ if ! test "$RCL"; then  # Container /etc/resolv.conf is not a symlink or it is a
       if (exists($conf{DNS}) and !exists($confhad{DNS})) { for my $dns (split(/ /, $conf{DNS})) { print "nameserver $dns\n" } }
   ' "$CONAME".container/rootfs/etc/resolv.conf.container || exit 2
 fi
+# Container /etc/resolv.conf may get overwritten by systemd-nspawn at container startup.
+cat <"$CONAME".container/rootfs/etc/resolv.conf.container >"$CONAME".container/rootfs/etc/resolv.conf || exit 2
 
 # TODO(pts): Security: don't follow symlinks.
 #
@@ -239,11 +249,8 @@ if test -f "$CONAME".container/rootfs/etc/systemd/resolved.conf; then
   ' "$CONAME".container/rootfs/etc/systemd/resolved.conf || exit 2
 fi
 
-# Undo incorrect setup_resolv_conf() magic in systemd-nspawn, which may
-# bind-mount or overwrite /etc/resolv.conf .  !! undo
 # This affects the `shell' command, which starts a login shell.
 : >>"$CONAME".container/rootfs/etc/profile || exit 2  # Create if needed.
-: >>"$CONAME".container/rootfs/etc/resolv.conf.container.start || exit 2  # Create.
 perl -pi -0777 -we '
     my $cmd = qq(if test -f /etc/resolv.conf.container.start; then umount /etc/resolv.conf 2>/dev/null; rm -f /etc/resolv.conf; cat </etc/resolv.conf.container >/etc/resolv.conf; rm -f /etc/resolv.conf.container.start; :; fi  #conconj\n) .
               qq(if test -f /etc/netup.container; then (. /etc/netup.container); rm -f /etc/netup.container; fi  #conconj\n);
@@ -330,34 +337,47 @@ fi
   # systemctl status container-resolv-conf.service
 fi
 
-if ! ip link show hostnet >/dev/null 2>&1; then
-  # https://unix.stackexchange.com/q/622914
-  # `type macvlan' works on Etherenet only (no wifi), `type ipvlan mode l2' works everywhere.
-  # ipvlan vs macvlan: https://sreeninet.wordpress.com/2016/05/29/macvlan-and-ipvlan/
-  # ip link del hostnet ||:
-  ip link add hostnet link "$NETDEV" type ipvlan mode l2 || exit 2
-  ip addr add "$HOSTNETIP"/32 brd + dev hostnet || exit 2
-  ip link set hostnet up || exit 2  # `ip route add' below needs it.
-fi
-
 GUESTNETNS=guest."$CONAME"
-GUESTIP=
-read GUESTIP <"$CONAME".container/ipaddr 2>/dev/null ||:
 
-ip link del "$GUESTNETNS"in 2>/dev/null ||:
-# ip -n "$GUESTNETNS" link del "$GUESTNETNS"in 2>/dev/null ||:
-if test "$GUESTIP"; then
-  # TODO(pts): If everything is all right, don't make any changes, so that
-  # currently running shells would continue working.
-  ip link add link "$NETDEV" name "$GUESTNETNS"in type ipvlan mode l2 || exit 2
-  test "$(ip route show "$GUESTIP"/32)" && ip route del "$GUESTIP"/32
-  ip route add "$GUESTIP"/32 dev hostnet || exit 2
-fi
+rm -f "$CONAME".container/rootfs/etc/resolv.conf.container.start || exit 2
+if test "$GUESTIP" = shared; then
+  test -d "$CONAME".container/rootfs/etc/network || mkdir "$CONAME".container/rootfs/etc/network || exit 2
+  echo "#conconj shared" >"$CONAME".container/rootfs/etc/network/interfaces || exit 2;
+  echo "#conconj shared" >"$CONAME".container/rootfs/etc/netup.container || exit 2
+  # TODO(pts): Disable systemd-resolved in the container, so that it doesn't
+  # try to bind on UDP 127.0.0.53:53 (which is probably already used by the
+  # host).
+  # !! disable systemd-resolved.service, to avoid warning: Dec 09 17:18:41 co92 systemd-resolved[30]: Another process is already listening on TCP socket 127.0.0.53:53.
+  #    do we need to bind-mount a dummy one to /lib/systemd/system/systemd-resolved.service -- or does /etc take precedence?
+elif test "$GUESTIP" = private; then
+  test -d "$CONAME".container/rootfs/etc/network || mkdir "$CONAME".container/rootfs/etc/network || exit 2
+  echo "#conconj private" >"$CONAME".container/rootfs/etc/network/interfaces || exit 2;
+  echo "#conconj private" >"$CONAME".container/rootfs/etc/netup.container || exit 2
+  set x --private-network "$@"; shift
+else
+  if ! ip link show hostnet >/dev/null 2>&1; then
+    # https://unix.stackexchange.com/q/622914
+    # `type macvlan' works on Etherenet only (no wifi), `type ipvlan mode l2' works everywhere.
+    # ipvlan vs macvlan: https://sreeninet.wordpress.com/2016/05/29/macvlan-and-ipvlan/
+    # ip link del hostnet ||:
+    ip link add hostnet link "$NETDEV" type ipvlan mode l2 || exit 2
+    ip addr add "$HOSTNETIP"/32 brd + dev hostnet || exit 2
+    ip link set hostnet up || exit 2  # `ip route add' below needs it.
+  fi
+  ip link del "$GUESTNETNS"in 2>/dev/null ||:
+  # ip -n "$GUESTNETNS" link del "$GUESTNETNS"in 2>/dev/null ||:
+  if test "$GUESTIP"; then
+    # TODO(pts): If everything is all right, don't make any changes, so that
+    # currently running shells would continue working.
+    ip link add link "$NETDEV" name "$GUESTNETNS"in type ipvlan mode l2 || exit 2
+    test "$(ip route show "$GUESTIP"/32)" && ip route del "$GUESTIP"/32
+    ip route add "$GUESTIP"/32 dev hostnet || exit 2
+  fi
 
-# This file is not used directly, it can be used by manually running `ifup -a'
-# after `sudo apt-get install -y ifupdown'.
-test -d "$CONAME".container/rootfs/etc/network || mkdir "$CONAME".container/rootfs/etc/network || exit 2
-echo "
+  # This file is not used directly, it can be used by manually running `ifup -a'
+  # after `sudo apt-get install -y ifupdown'.
+  test -d "$CONAME".container/rootfs/etc/network || mkdir "$CONAME".container/rootfs/etc/network || exit 2
+  echo "#conconj
 auto lo
 iface lo inet loopback
 
@@ -367,11 +387,17 @@ iface ${GUESTNETNS}in inet static
   netmask $NETMASK
   gateway $NETGATEWAY
 " >"$CONAME".container/rootfs/etc/network/interfaces || exit 2;
-# Broadcast is enabled by default, no need for `broadcast +'.
-echo "
-    /etc/busybox.conconj ifconfig '${GUESTNETNS}in' '$GUESTIP' netmask '$NETMASK' up || exit \$?
-    /etc/busybox.conconj route add default gw '$NETGATEWAY' || exit \$?
-">"$CONAME".container/rootfs/etc/netup.container || exit 2
+  # Broadcast is enabled by default, no need for `broadcast +'.
+  echo "
+/etc/busybox.conconj ifconfig '${GUESTNETNS}in' '$GUESTIP' netmask '$NETMASK' up || exit \$?
+/etc/busybox.conconj route add default gw '$NETGATEWAY' || exit \$?
+" >"$CONAME".container/rootfs/etc/netup.container || exit 2
+  set x --network-interface="$GUESTNETNS"in "$@"; shift
+  # Undo incorrect setup_resolv_conf() magic in systemd-nspawn, which may
+  # bind-mount or overwrite /etc/resolv.conf .  !! undo
+  : >>"$CONAME".container/rootfs/etc/resolv.conf.container.start || exit 2  # Create.
+fi
+
 echo "
     if test -f /etc/netup.container; then
       (. /etc/netup.container); XC=\$?
@@ -397,9 +423,9 @@ echo 'CONFIGURE_INTERFACES=no
 BOOTARG=
 test "$CMD" = start-shell || BOOTARG=--boot
 set x $BOOTARG --directory="$CONAME".container/rootfs \
-    $BM --network-interface="$GUESTNETNS"in --bind-ro="$(pwd)"/busybox.conconj:/etc/busybox.conconj \
+    $BM --bind-ro="$(pwd)"/busybox.conconj:/etc/busybox.conconj \
     --capability=CAP_SYS_MODULE,CAP_NET_ADMIN \
-    --bind=/sys/fs/cgroup --machine="$CONAME" -- "$@"; shift
+    --bind=/sys/fs/cgroup --machine="$CONAME" "$@"; shift
 # With --private-users=no, container systemd freezes with: ``Failed to allocate manager object, freezing.''.
 export SYSTEMD_NSPAWN_USE_CGNS=0  # Needed by Docker.
 
