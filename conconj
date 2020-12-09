@@ -54,7 +54,7 @@ if test "$CMD" = list; then
 fi
 
 case "$CONAME" in
- -* | *[^-._a-zA-Z0-9]* | "") echo "fatal: bad container name: $CONAME"; exit 1 ;;
+ -* | *[!-._a-zA-Z0-9]* | "") echo "fatal: bad container name: $CONAME"; exit 1 ;;
 esac
 CODIR="${0%/*}"
 cd "$CODIR" || exit 2
