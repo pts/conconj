@@ -256,8 +256,11 @@ fi
 ' >"$CONAME".container/rootfs/etc/resolv.conf.container.setup || exit 2
   #chmod 755 "$CONAME".container/rootfs/etc/resolv.conf.crontainer.setup || exit 2
   rm -f "$CONAME".container/rootfs/etc/systemd/system/multi-user.target.wants/container-resolv-conf.service || exit 2
-  # Equivalent of in-container: systemctl enable container-resolv-conf.service
-  ln -s /etc/systemd/system/container-resolv-conf.service "$CONAME".container/rootfs/etc/systemd/system/multi-user.target.wants/container-resolv-conf.service || exit 2
+  # Directory missing before `apt-get install systemd-sysv`.
+  if test -d "$CONAME".container/rootfs/etc/systemd/system/multi-user.target.wants; then
+    # Equivalent of in-container: systemctl enable container-resolv-conf.service
+    ln -s /etc/systemd/system/container-resolv-conf.service "$CONAME".container/rootfs/etc/systemd/system/multi-user.target.wants/container-resolv-conf.service || exit 2
+  fi
   # systemctl status container-resolv-conf.service
 fi
 
