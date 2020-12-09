@@ -6,7 +6,7 @@
 # TODO(pts): sudo apt-get install -y systemd-container  # For systemd-nspawn.
 # TODO(pts): sudo apt-get install -y iproute2  # For ip.
 # TODO(pts): systemd-nspawn --notify-ready=
-# !! TODO(pts): why needed after: apt-get install docker? systemctl start docker; also for openssh-server
+# !! TODO(pts): why needed after: apt-get install docker? systemctl start docker; also for openssh-server; solution: rm /usr/sbin/policy-rc.d
 # !! TODO(pts): The --bind /shared directory.
 # !! TODO(pts): timezone -- which packages are needed?
 # !! TODO(pts): /etc/default/locale ?
@@ -26,6 +26,10 @@ if test "$1" = start || test "$1" = shell || test "$1" = poweroff || test "$1" =
   if test $# != 1; then
     CMD="$1"; CONAME="$2"; shift; shift
   fi
+elif test "$1" = list; then
+  if test $# = 1; then
+    CMD="$1"; shift
+  fi
 elif test $# = 1 && test "${1#-}" = "$1"; then
   CMD=start; CONAME="$1"; shift
 fi
@@ -38,13 +42,20 @@ Usage: $0 [start] <container-name>
        $0 shell <container-name>
        $0 show <container-name>
        $0 poweroff <container-name>  # Gracefully, don't wait.
-       $0 kill <container-name> [<arg> ...]" >&2
+       $0 kill <container-name> [<arg> ...]
+       $0 list  # List active containers." >&2
   exit 1
 fi
+
+if test "$CMD" = list; then
+  exec machinectl "$CMD" "$@"
+  echo "fatal: command not found: machinectl" >&2
+  exit 2
+fi
+
 case "$CONAME" in
  -* | *[^-._a-zA-Z0-9]* | "") echo "fatal: bad container name: $CONAME"; exit 1 ;;
 esac
-
 CODIR="${0%/*}"
 cd "$CODIR" || exit 2
 
