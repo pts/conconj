@@ -6,6 +6,12 @@
 # TODO(pts): sudo apt-get install -y systemd-container  # For systemd-nspawn.
 # TODO(pts): sudo apt-get install -y iproute2  # For ip.
 # TODO(pts): systemd-nspawn --notify-ready=
+# TODO(pts): stty \.../
+# TODO(pts): (apt-get install modprobe?) kmod-static-nodes.service: Main process exited, code=exited, status=203/EXEC
+#            [FAILED] Failed to start Create list of requ…vice nodes for the current kernel.
+# !! TODO(pts): doc: Debian: this is normal: -- make it optional
+#               Failed to mount n/a on /tmp/runc/co18.container/rootfs/sys/fs/selinux (MS_BIND ""): No such file or directory
+#               Failed to mount n/a on /tmp/runc/co18.container/rootfs/sys/fs/selinux (MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC|MS_REMOUNT|MS_BIND ""): Invalid argument
 # !! TODO(pts): why needed after: apt-get install docker? systemctl start docker; also for openssh-server; solution: rm /usr/sbin/policy-rc.d
 # !! TODO(pts): The --bind /shared directory.
 # !! TODO(pts): timezone -- which packages are needed?
@@ -19,7 +25,8 @@
 # * Ubuntu 16.04: ??
 # * Ubuntu 18.04: Tested, it works. It has systemd 237.
 # * Ubuntu 20.04: Tested, it works.
-# * Debian 9: It has systemd 232, whose systemd-nspawn doesn't have --network-namespace-path=
+# * Debian 9: It has systemd 232, whose systemd-nspawn doesn't have --system-call-filter=..., so it doesn't support Docker.
+# * Debian 10: It works.
 #
 
 if test -z "$RUNN_RERUN" && ! (test $# = 0 || test "$1" = --help); then
@@ -41,7 +48,7 @@ elif test "$1" = list; then
 elif test $# = 1 && test "${1#-}" = "$1"; then
   CMD=start; CONAME="$1"; shift
 fi
-if test "$CMD" = start || test "$CMD" = shell || test "$CMD" = poweroff || test "$CMD" = show; then
+if test "$CMD" = start || test "$CMD" = poweroff || test "$CMD" = show; then
   test $# != 0 && CMD=  # Too many command-line arguments.
 fi
 if ! test "$CMD"; then
@@ -77,11 +84,24 @@ if test "$CMD" = start || test "$CMD" = shell; then
     fi
   elif test "$CMD" = shell; then
     CMD=start-shell
+    if test $# != 0 && test "${1#/}" = "$1"; then
+      # For compatibility with machinectl shell.
+      echo "fatal: shell command must start with /: $1" >&2
+      exit 1
+    fi
   fi
+fi
+if test "$CMD" = shell && test $# = 0; then  # machinectl systemd 232 doesn't autodetect /bin/bash.
+  test -f "$CONAME".container/rootfs/bin/bash && set /bin/bash -l
 fi
 if test "$CMD" != start && test "$CMD" != start-shell; then
   exec machinectl "$CMD" "$CONAME" "$@"
   echo "fatal: command not found: machinectl" >&2
+  exit 2
+fi
+
+if ! test -f "busybox.conconj" || ! test -x "busybox.conconj"; then
+  echo "fatal: executable not found: $CODIR/busybox.conconj"
   exit 2
 fi
 
@@ -104,19 +124,25 @@ if ! read HOSTNETIP <conconj.hostnet 2>/dev/null; then
   echo "fatal: missing or empty: $CODIR/conconj.hostnet"
   exit 2
 fi
-# Example: HOSTNETIP=192.168.0.90 NETDIEV=wlp2s0
+
+# ---
+
+chown 0.0 "$CONAME".container/rootfs || exit 2
+
+# Example: HOSTNETIP=192.168.0.90 NETDEV=wlp2s0
 NETDEV="$(ip -o addr | perl -we 'use integer; use strict;
     die "fatal: bad hostnetip: $ARGV[0]" if $ARGV[0] !~ m@\A(\d+)[.](\d+)[.](\d+)[.](\d+)(?:/32)?\Z(?!\n)@;
     my $hostnetip = unpack("N", pack("C4", $1, $2, $3, $4));
-    my $netdev; my $netmaskbits;
+    my $netdev; my $netmaskbits; my $netmask;
     while (<STDIN>) { chomp; my @l = split; if (@l > 3 and $l[2] eq "inet" and $l[1] ne "lo" and $l[3] =~ m@\A(\d+)[.](\d+)[.](\d+)[.](\d+)/(\d+)\Z(?!\n)@ and $5 != 32 and $5 >= 8 and $5 <= 32) {
       my $ip = unpack("N", pack("C4", $1, $2, $3, $4)); my $mask = unpack("N", pack("N", -1 << (32 - $5))); if (($ip & $mask) == ($hostnetip & $mask)) {
-        die "fatal: multiple network devices for hostnetip: $ARGV[0]\n" if defined($netdev);
-        $netdev = $l[1]; $netmaskbits = $5; } } }
+        die "fatal: multiple network devices for hostnetip: $ARGV[0]\n" if defined($netdev);  # The $5 != 32 check above ensures that hostnet is ignored here.
+        $netdev = $l[1]; $netmaskbits = $5; $netmask = $mask; } } }
     die "fatal: missing network device for hostnetip: $ARGV[0]\n" if !defined($netdev);
-    print "$netdev $netmaskbits\n"' -- "$HOSTNETIP")"
-NETMASKBITS="${NETDEV#* }"
-NETDEV="${NETDEV%% *}"
+    $netmask = join(".", unpack("C4", pack("N", $netmask)));
+    print "NETDEV=\x27$netdev\x27; NETMASKBITS=\x27$netmaskbits\x27; NETMASK=\x27$netmask\x27\n"' -- "$HOSTNETIP")"
+test "$NETDEV" || exit 2
+eval "$NETDEV"  # Set NETDEV=...; NETMASKBITS=...; NETMASK=...
 test "$NETDEV" || exit 2
 test "$NETMASKBITS" || exit 2
 
@@ -214,13 +240,15 @@ if test -f "$CONAME".container/rootfs/etc/systemd/resolved.conf; then
 fi
 
 # Undo incorrect setup_resolv_conf() magic in systemd-nspawn, which may
-# bind-mount or overwrite /etc/resolv.conf .
+# bind-mount or overwrite /etc/resolv.conf .  !! undo
 # This affects the `shell' command, which starts a login shell.
 : >>"$CONAME".container/rootfs/etc/profile || exit 2  # Create if needed.
 : >>"$CONAME".container/rootfs/etc/resolv.conf.container.start || exit 2  # Create.
 perl -pi -0777 -we '
-    my $cmd = q(if test -f /etc/resolv.conf.container.start; then umount /etc/resolv.conf 2>/dev/null; rm -f /etc/resolv.conf; cat </etc/resolv.conf.container >/etc/resolv.conf; rm -f /etc/resolv.conf.container.start; :; fi) . "\n";
-    s@\A@$cmd@ if !m@\A\Q$cmd@;
+    my $cmd = qq(if test -f /etc/resolv.conf.container.start; then umount /etc/resolv.conf 2>/dev/null; rm -f /etc/resolv.conf; cat </etc/resolv.conf.container >/etc/resolv.conf; rm -f /etc/resolv.conf.container.start; :; fi  #conconj\n) .
+              qq(if test -f /etc/netup.container; then (. /etc/netup.container); rm -f /etc/netup.container; fi  #conconj\n);
+    1 while s@\A(.*) #conconj\n@@;
+    substr($_, 0, 0) = $cmd;
     ' "$CONAME".container/rootfs/etc/profile || exit 2
 
 (ip -o addr show hostnet 2>/dev/null | while read A B C D E; do
@@ -239,10 +267,34 @@ if test -d "$CONAME".container/rootfs/etc/systemd/system; then
   # https://www.linode.com/docs/guides/start-service-at-boot/
   echo '
 [Unit]
+Description=Network interfaces in container
+DefaultDependencies=no
+Conflicts=shutdown.target
+After=
+Before=systemd-networkd.service container-resolv-conf.service network.target shutdown.target
+#Wants= Requires= Requisite=qqsystemd-resolved.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh /etc/netup.rm.container
+
+[Install]
+WantedBy=multi-user.target
+' >"$CONAME".container/rootfs/etc/systemd/system/container-network.service || exit 2
+  rm -f "$CONAME".container/rootfs/etc/systemd/system/multi-user.target.wants/container-network.service || exit 2
+  # Directory missing before `apt-get install systemd-sysv`.
+  if test -d "$CONAME".container/rootfs/etc/systemd/system/multi-user.target.wants; then
+    # Equivalent of in-container: systemctl enable container-network.service
+    ln -s /etc/systemd/system/container-network.service "$CONAME".container/rootfs/etc/systemd/system/multi-user.target.wants/container-network.service || exit 2
+  fi
+  # !! --network-interface= implies --private-network, so systemd-nspawn doesn't try to mess with /etc/resolv.conf, so this hack is not needed.
+  echo '
+[Unit]
 Description=Set up /etc/resolv.conf in container
 DefaultDependencies=no
 Conflicts=shutdown.target
-After=systemd-resolved.service systemd-networkd.service
+After=systemd-resolved.service systemd-networkd.service container-network.service
 Before=network.target nss-lookup.target shutdown.target
 #Wants= Requires= Requisite=qqsystemd-resolved.service
 
@@ -289,84 +341,119 @@ if ! ip link show hostnet >/dev/null 2>&1; then
 fi
 
 GUESTNETNS=guest."$CONAME"
-#ip netns del "$GUESTNETNS" && sleep .5 ||:
-if (ip netns list | while read A B; do test "$A" = "$GUESTNETNS" && exit 2; done; test $? = 2 && exit 2; exit 0); then
-  # Network namespace $GUESTNETNS doesn't exist, create it.
-  ip netns add "$GUESTNETNS" || exit 2
-  ip -n "$GUESTNETNS" link set lo up || exit 2
-  # Needed by Docker.
-  echo 1 | ip netns exec "$GUESTNETNS" tee /proc/sys/net/ipv4/ip_forward >/dev/null || exit 2
-fi
-
 GUESTIP=
 read GUESTIP <"$CONAME".container/ipaddr 2>/dev/null ||:
 
 ip link del "$GUESTNETNS"in 2>/dev/null ||:
-ip -n "$GUESTNETNS" link del "$GUESTNETNS"in 2>/dev/null ||:
+# ip -n "$GUESTNETNS" link del "$GUESTNETNS"in 2>/dev/null ||:
 if test "$GUESTIP"; then
   # TODO(pts): If everything is all right, don't make any changes, so that
   # currently running shells would continue working.
   ip link add link "$NETDEV" name "$GUESTNETNS"in type ipvlan mode l2 || exit 2
-  ip link set "$GUESTNETNS"in netns "$GUESTNETNS" || exit 2
-  ip -n "$GUESTNETNS" addr add "$GUESTIP/$NETMASKBITS" brd + dev "$GUESTNETNS"in || exit 2
-  ip -n "$GUESTNETNS" link set "$GUESTNETNS"in up || exit 2
-  ip -n "$GUESTNETNS" route add default via "$NETGATEWAY" || exit 2
   test "$(ip route show "$GUESTIP"/32)" && ip route del "$GUESTIP"/32
   ip route add "$GUESTIP"/32 dev hostnet || exit 2
 fi
 
-chown 0.0 "$CONAME".container/rootfs || exit 2
+# This file is not used directly, it can be used by manually running `ifup -a'
+# after `sudo apt-get install -y ifupdown'.
+test -d "$CONAME".container/rootfs/etc/network || mkdir "$CONAME".container/rootfs/etc/network || exit 2
+echo "
+auto lo
+iface lo inet loopback
+
+auto ${GUESTNETNS}in
+iface ${GUESTNETNS}in inet static
+  address $GUESTIP
+  netmask $NETMASK
+  gateway $NETGATEWAY
+" >"$CONAME".container/rootfs/etc/network/interfaces || exit 2;
+# Broadcast is enabled by default, no need for `broadcast +'.
+echo "
+    /etc/busybox.conconj ifconfig '${GUESTNETNS}in' '$GUESTIP' netmask '$NETMASK' up || exit \$?
+    /etc/busybox.conconj route add default gw '$NETGATEWAY' || exit \$?
+">"$CONAME".container/rootfs/etc/netup.container || exit 2
+echo "
+    if test -f /etc/netup.container; then
+      (. /etc/netup.container); XC=\$?
+      rm -f /etc/netup.container
+      exit \$XC
+    fi
+">"$CONAME".container/rootfs/etc/netup.rm.container || exit 2
+test -d "$CONAME".container/rootfs/etc/default || mkdir "$CONAME".container/rootfs/etc/default || exit 2
+# Disable `ifup -a' call in /lib/systemd/system/networking.service
+echo 'CONFIGURE_INTERFACES=no
+' >"$CONAME".container/rootfs/etc/default/networking || exit 2;
+# Broadcast is enabled by default, no need for `broadcast +'.
+
+# !! Add setting without Docker.
+# Docker needs --capability=CAP_SYS_MODULE,CAP_NET_ADMIN .
+# --bind=/sys/fs/cgroup is needed by docker.
+# --capability=CAP_SYS_MODULE,CAP_NET_ADMIN is needed by Docker, but not by iptables.
+# --capability=all is too much, not needed.
+# By using --network-interface=... (but not --network-namespace-path=...),
+# this is not needed, docker can set it up for itself:
+#   echo 1 | ip netns exec "$GUESTNETNS" tee /proc/sys/net/ipv4/ip_forward >/dev/null || exit 2
+
+BOOTARG=
+test "$CMD" = start-shell || BOOTARG=--boot
+set x $BOOTARG --directory="$CONAME".container/rootfs \
+    $BM --network-interface="$GUESTNETNS"in --bind-ro="$(pwd)"/busybox.conconj:/etc/busybox.conconj \
+    --capability=CAP_SYS_MODULE,CAP_NET_ADMIN \
+    --bind=/sys/fs/cgroup --machine="$CONAME" -- "$@"; shift
+# With --private-users=no, container systemd freezes with: ``Failed to allocate manager object, freezing.''.
+export SYSTEMD_NSPAWN_USE_CGNS=0  # Needed by Docker.
+
+LINE="$(systemd-nspawn --system-call-filter= --directory=/dev/null 2>&1)"
+case "$LINE" in *--system-call-filter=*) ;; *) LINE="" ;; esac
+SYSTEMD_NSPAWN=systemd-nspawn
+if test "$LINE"; then  # Old systemd-nspawn without --system-call-filter=... .
+  if ! test -f patch_nspawn.pl; then
+    echo "fatal: script not found: $CODIR/patch_nspawn.pl" >&2
+    exit 2
+  fi
+  LINE="$(type systemd-nspawn 2>&1)"
+  case "$LINE" in systemd-nspawn\ is\ /*) LINE="${LINE#* is }" ;; *) LINE="" ;; esac
+  if test -z "$LINE"; then
+    echo "fatal: command not found: systemd-nspawn" >&2
+    exit 2
+  fi
+  # This can patch systemd-nspawn 232 on Debian 9 on Linux amd64.
+  if ! perl patch_nspawn.pl "$LINE" systemd-nspawn.docker; then
+    echo "fatal: systemd-nspawn does not support --system-call-filter=... , binary patching didn't work" >&2
+    exit 2
+  fi
+  SYSTEMD_NSPAWN="$CODIR"/systemd-nspawn.docker
+  set ./systemd-nspawn.docker "$@"
+else
+  SYSTEMD_NSPAWN=systemd-nspawn
+  set "$SYSTEMD_NSPAWN" --system-call-filter="add_key keyctl" "$@"
+fi
 
 if test "$CMD" = start-shell; then
-  exec systemd-nspawn --directory="$CONAME".container/rootfs \
-      $BM --network-namespace-path=/var/run/netns/"$GUESTNETNS" \
-      --machine="$CONAME" \
-      ;
-  echo "$0: command not found: systemd-nspawn" >&2
+  exec "$@"
+  echo "fatal: command not found: $1" >&2
   exit 2
 fi
 
 exec 9>"$CONAME".container/console.out.tmp </dev/null
-# Docker needs --capability=CAP_SYS_MODULE,CAP_NET_ADMIN
-# Docker needs --bind /proc/sys/net/ipv4 for .../ip_forward
-# TODO(pts): Enable starting without Docker.
-#   SUXX: no effect, mounted before /proc/sys
-#   --bind /proc/sys/net/ipv4 \
-# SUXX: echo 1 >/proc/sys/net/ipv4/ip_forward ||:  # For Docker.
-#    without export SYSTEMD_NSPAWN_USE_CGNS=0  # Needed by Docker.
-#    --bind=/sys/fs/cgroup \
-#    --bind=/sys/fs/cgroup --system-call-filter='add_key keyctl' \
-#    --bind=/sys/fs/cgroup --system-call-filter='add_key keyctl' --private-users=no \
-        # Failed to create /init.scope control group: No such file or directory
-        # Failed to allocate manager object: No such file or directory
-        # [!!!!!!] Failed to allocate manager object, freezing.
-        # Freezing execution.
-#    --capability=CAP_SYS_MODULE,CAP_NET_ADMIN \
-#    --capability=all \
-export SYSTEMD_NSPAWN_USE_CGNS=0  # Needed by Docker.
-systemd-nspawn --boot --directory="$CONAME".container/rootfs \
-    $BM --network-namespace-path=/var/run/netns/"$GUESTNETNS" \
-    --capability=CAP_SYS_MODULE,CAP_NET_ADMIN \
-    --bind=/sys/fs/cgroup --system-call-filter='add_key keyctl' \
-    --machine="$CONAME" >&9 2>&9 &
-exec 9>&1
+"$@" >&9 2>&9 &  # This generates some shell-specific command-not-found error.
+exec 9>&2
 while ! read LINE <"$CONAME".container/console.out.tmp; do :; done
 E=
-#if machinectl show -- "$CONAME" >/dev/null; then
-#read LINE <"$CONAME".container/console.out.tmp || exit 1
 case "$LINE" in
  Directory\ tree\ *\ is\ currently\ busy*) E=1 ;;
- Spawning\ *) ;; *) E=2 ;;
+ Spawning\ *) ;;  # Success (at least so far).
+ *:\ not\ found | *:\ command\ not\ found) E=2 ;;
+ *) E=0 ;;
 esac
-#else
-#  E=1
-#fi
 if test "$E"; then
-  if test "$E" = 1; then
-    echo "info: shotdown gracefully: $0 poweroff $CONAME" >&2
+  if test "$E" = 1; then  # Already unning.
+    echo "info: shutdown gracefully: $0 poweroff $CONAME" >&2
     echo "info: force kill: $0 kill $CONAME -s 9" >&2
     echo "fatal: container already running: $CONAME" >&2
-  else
+  elif test "$E" = 2; then
+    echo "fatal: command not found: $SYSTEMD_NSPAWN" >&2
+  else #elif test "$E" = 0; then
     cat "$CONAME".container/console.out.tmp >&2
     rm -f "$CONAME".container/console.out.tmp
   fi
