@@ -78,7 +78,12 @@ if test "$CMD" != start && test "$CMD" != start-shell; then
 fi
 
 if ! test -d "$CONAME.container/rootfs"; then
-  echo "fatal: missing rootfs directory: $CODIR/$CONAME.container/rootfs"
+  echo "fatal: missing rootfs directory in container: $CODIR/$CONAME.container/rootfs"
+  exit 2
+fi
+
+if ! test -f "$CONAME.container/rootfs/bin/sh"; then
+  echo "fatal: missing shell in container: $CODIR/$CONAME.container/rootfs/bin/sh"
   exit 2
 fi
 
@@ -89,6 +94,7 @@ fi
 
 if ! read HOSTNETIP <conconj.hostnet 2>/dev/null; then
   echo "fatal: missing or empty: $CODIR/conconj.hostnet"
+  exit 2
 fi
 # Example: HOSTNETIP=192.168.0.90 NETDIEV=wlp2s0
 NETDEV="$(ip -o addr | perl -we 'use integer; use strict;
