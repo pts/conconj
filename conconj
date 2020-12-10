@@ -13,6 +13,9 @@
 # TODO(pts): stty \.../
 # TODO(pts): (apt-get install modprobe?) kmod-static-nodes.service: Main process exited, code=exited, status=203/EXEC
 #            [FAILED] Failed to start Create list of requ…vice nodes for the current kernel.
+# !! TODO(pts): feature: networking mode nat: virtual bridge with NAT
+# !! TODO(pts): Test DNS and Docker in Debian 7 (sysvinit).
+# !! TODO(pts): Does modprobe actually work (e.g. aufs)? Or do we need to adjust --system-call-filter=...?
 # !! TODO(pts): Rename GUEST to CON.
 # !! TODO(pts): Look at error messages from dockerd, install kmod (modprobe) etc.
 # !! TODO(pts): doc: Debian: this is normal: -- make it optional
@@ -25,16 +28,6 @@
 # !! TODO(pts): Add "$HOSTNETIP host" to /etc/hosts , also copy from/to host /etc/hosts
 # !! TODO(pts): Add other type of networking: same-as-host (bind on the same port won't work), private, separate-ip (currently implemented), to-host, to-host-and-containers, host (-n, may include masquerade; only works if the container is also running systemd (because of DHCP client); no communication with other containers).
 #
-# Host compatibility:
-#
-# * Ubuntu 14.04: Doesn't work, it doesn't have systemd-nspawn. It has systemd-204, but only parts are installed, it doesn't have systemd-sysv.
-# * Ubuntu 16.04: It works with patch_nspawn.pl for systemd 229.
-# * Ubuntu 18.04: Tested, it works. It has systemd 237.
-# * Ubuntu 20.04: Tested, it works.
-# * Debian 8: ?? It has systemd 215, with systemd-nspawn included (no need to install systemd-container).
-# * Debian 9: It works, with patch_nspawn.pl for systemd 232.
-# * Debian 10: It works.
-#
 
 if test -z "$RUNN_RERUN" && ! (test $# = 0 || test "$1" = --help); then
   unset S
@@ -44,7 +37,7 @@ if test -z "$RUNN_RERUN" && ! (test $# = 0 || test "$1" = --help); then
 fi
 
 CMD=
-if test "$1" = start || test "$1" = shell || test "$1" = poweroff || test "$1" = kill || test "$1" = show; then
+if test "$1" = start || test "$1" = shell || test "$1" = login || test "$1" = poweroff || test "$1" = kill || test "$1" = show; then
   if test $# != 1; then
     CMD="$1"; CONAME="$2"; shift; shift
   fi
@@ -55,16 +48,18 @@ elif test "$1" = list; then
 elif test $# = 1 && test "${1#-}" = "$1"; then
   CMD=start; CONAME="$1"; shift
 fi
-if test "$CMD" = start || test "$CMD" = poweroff || test "$CMD" = show; then
+if test "$CMD" = start || test "$CMD" = login || test "$CMD" = poweroff || test "$CMD" = show; then
   test $# != 0 && CMD=  # Too many command-line arguments.
 fi
 if ! test "$CMD"; then
   echo "\
+$0: conconj container manager
 Usage: $0 [start] <container-name>
-       $0 shell <container-name>
+       $0 shell <container-name>  # Root shell.
        $0 show <container-name>
        $0 poweroff <container-name>  # Gracefully, don't wait.
        $0 kill <container-name> [<arg> ...]
+       $0 login <container-name>
        $0 list  # List active containers." >&2
   exit 1
 fi
@@ -120,6 +115,7 @@ if ! test -f "$CONAME.container/rootfs/bin/sh"; then
   echo "fatal: missing shell in container: $CODIR/$CONAME.container/rootfs/bin/sh"
   exit 2
 fi
+export PERL_BADLANG=x  # Unnecessary, because LC_* is unset.
 if ! perl -e0 2>/dev/null; then
   echo "fatal: perl doesn't work" >&2
   exit 2
@@ -187,7 +183,7 @@ else
       # resolvectl: systemd 245.4, Ubuntu 20.04
       LINE="$(systemd-resolve --status "$NETDEV" 2>/dev/null || resolvectl --status "$NETDEV" 2>/dev/null)"  # Network interface.
       case "$LINE" in
-       *DNS\ Servers:\ *) ;;
+       *DNS\ Servers:\ *) ISSR= ;;
        *) ISSR=1 ;;  # Fall back to NetworkManager.
       esac
     fi
@@ -380,21 +376,45 @@ elif test "$GUESTIP" = private; then
   echo "#conconj private" >"$CONAME".container/rootfs/etc/netup.container || exit 2
   set x --private-network "$@"; shift
 else
+  ISMV=
   if ! ip link show hostnet >/dev/null 2>&1; then
     # https://unix.stackexchange.com/q/622914
     # `type macvlan' works on Etherenet only (no wifi), `type ipvlan mode l2' works everywhere.
     # ipvlan vs macvlan: https://sreeninet.wordpress.com/2016/05/29/macvlan-and-ipvlan/
-    # ip link del hostnet ||:
-    ip link add hostnet link "$NETDEV" type ipvlan mode l2 || exit 2
+    if test "$ISMV" || ! ip link add name hostnet link "$NETDEV" type ipvlan mode l2 2>/dev/null; then
+      # Debian 8 doesn't have ipvlan (not even ipvlan.ko), so we fall back
+      # to macvlan. Network won't work (not even from host) over wifi.
+      ISMV=1
+      if ! ip link add name hostnet link "$NETDEV" type macvlan; then
+        # If the error message is `RTNETLINK answers: Device or resource
+        # busy', then it may be a macvlan--ipvlan incompatibility. Solve it
+        # by stopping all containers, then running `sudo ip link del dev ...'
+        # on all guest.... devices including hostnet.
+        echo "fatal: error creating network device: hostnet" >&2
+        exit 2
+      fi
+    fi
     ip addr add "$HOSTNETIP"/32 brd + dev hostnet || exit 2
     ip link set hostnet up || exit 2  # `ip route add' below needs it.
   fi
   ip link del "$GUESTNETNS"in 2>/dev/null ||:
   # ip -n "$GUESTNETNS" link del "$GUESTNETNS"in 2>/dev/null ||:
   if test "$GUESTIP"; then
-    # TODO(pts): If everything is all right, don't make any changes, so that
-    # currently running shells would continue working.
-    ip link add link "$NETDEV" name "$GUESTNETNS"in type ipvlan mode l2 || exit 2
+    # TODO(pts): If everything is all right (includin type ...lan), don't
+    # make any changes, so that currently running shells would continue
+    # working.
+    if test "$ISMV" || ! ip link add name "$GUESTNETNS"in link "$NETDEV" type ipvlan mode l2 2>/dev/null; then
+      # Falling back to macvlan, see above.
+      ISMV=1
+      if ! ip link add name "$GUESTNETNS"in link "$NETDEV" type macvlan; then
+        # If the error message is `RTNETLINK answers: Device or resource
+        # busy', then it may be a macvlan--ipvlan incompatibility. Solve it
+        # by stopping all containers, then running `sudo ip link del dev ...'
+        # on all guest.... devices including hostnet.
+        echo "fatal: error creating network device: ${GUESTNETNS}in" >&2
+        exit 2
+      fi
+    fi
     test "$(ip route show "$GUESTIP"/32)" && ip route del "$GUESTIP"/32
     ip route add "$GUESTIP"/32 dev hostnet || exit 2
   fi
@@ -448,6 +468,11 @@ test -d "$CONAME".container/rootfs/etc/default || mkdir "$CONAME".container/root
 echo 'CONFIGURE_INTERFACES=no
 ' >"$CONAME".container/rootfs/etc/default/networking || exit 2;
 # Broadcast is enabled by default, no need for `broadcast +'.
+
+if test -f "$CONAME".container/rootfs/etc/pam.d/login &&
+   perl -e 'while (<>) { exit 0 if m@ pam_securetty[.]so$@ and !m@^#@ } exit 1' "$CONAME".container/rootfs/etc/pam.d/login ; then
+  perl -pi -e 's@^(?=[^#])@#@ if m@ pam_securetty[.]so$@' "$CONAME".container/rootfs/etc/pam.d/login || exit 2
+fi
 
 # !! Add setting without Docker.
 # Docker needs --capability=CAP_SYS_MODULE,CAP_NET_ADMIN .
