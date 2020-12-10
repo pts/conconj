@@ -5,11 +5,16 @@
 #
 # TODO(pts): sudo apt-get install -y systemd-container  # For systemd-nspawn.
 # TODO(pts): sudo apt-get install -y iproute2  # For ip.
+# TODO(pts): in-container: sudo apt-get install systemd-sysv
+# TODO(pts): in-container: sudo apt-get install -y kmod  # For modprobe. To get rid of systemd startup errors.
+# TODO(pts): in-container: sudo apt-get install -y iputils-ping  # For ping. (But busybox can also have it.)
+# TODO(pts): in-container: sudo apt-get install -y docker.io kmod  # For docker.
 # TODO(pts): systemd-nspawn --notify-ready=
 # TODO(pts): stty \.../
 # TODO(pts): (apt-get install modprobe?) kmod-static-nodes.service: Main process exited, code=exited, status=203/EXEC
 #            [FAILED] Failed to start Create list of requ…vice nodes for the current kernel.
-# !! Rename GUEST to CON.
+# !! TODO(pts): Rename GUEST to CON.
+# !! TODO(pts): Look at error messages from dockerd, install kmod (modprobe) etc.
 # !! TODO(pts): doc: Debian: this is normal: -- make it optional
 #               Failed to mount n/a on /tmp/runc/co18.container/rootfs/sys/fs/selinux (MS_BIND ""): No such file or directory
 #               Failed to mount n/a on /tmp/runc/co18.container/rootfs/sys/fs/selinux (MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC|MS_REMOUNT|MS_BIND ""): Invalid argument
@@ -22,10 +27,11 @@
 #
 # Host compatibility:
 #
-# * Ubuntu 14.04: Doesn't work, it doesn't have systemd-nspawn.
-# * Ubuntu 16.04: ??
+# * Ubuntu 14.04: Doesn't work, it doesn't have systemd-nspawn. It has systemd-204, but only parts are installed, it doesn't have systemd-sysv.
+# * Ubuntu 16.04: It works with patch_nspawn.pl for systemd 229.
 # * Ubuntu 18.04: Tested, it works. It has systemd 237.
 # * Ubuntu 20.04: Tested, it works.
+# * Debian 8: ?? It has systemd 215, with systemd-nspawn included (no need to install systemd-container).
 # * Debian 9: It works, with patch_nspawn.pl for systemd 232.
 # * Debian 10: It works.
 #
@@ -165,20 +171,38 @@ else
   BM=
 fi
 
-ISSR=
 if test "$GUESTIP" = private; then
   LINE=""  # No DNS servers in the container please.
 else
+  ISSR=
   while read A B C; do
-    test "$A" = nameserver && test "$B" = 127.0.0.53 && ISSR=1 && break  # systemd-resolved.
+    if test "$A" = nameserver; then
+      # 127.0.1.1 (and others) indicates dnsmasq, 127.0.0.53 indicates systemd-resolved.
+      case "$B" in 127.0.0.53) ISSR=2; break ;; 127.0.*) ISSR=1; break ;; esac
+    fi
   done </etc/resolv.conf
-  if test "$ISSR"; then
-    # systemd-resolve: systemd 237, Ubuntu 18.04
-    # resolvectl: systemd 245.4, Ubuntu 20.04
-    LINE="$(systemd-resolve --status "$NETDEV" 2>/dev/null || resolvectl --status "$NETDEV" 2>/dev/null)"  # Network interface.
-    case "$LINE" in
-     *DNS\ Servers:\ *) ISSR=2 ;;  # TODO(pts): How to use $ISSR?
-    esac
+  if test "$ISSR"; then  # Local DNS servers are listed in /etc/resolv.conf.
+    if test "$ISSR" = 2; then  # systemd-resolved.
+      # systemd-resolve: systemd 237, Ubuntu 18.04
+      # resolvectl: systemd 245.4, Ubuntu 20.04
+      LINE="$(systemd-resolve --status "$NETDEV" 2>/dev/null || resolvectl --status "$NETDEV" 2>/dev/null)"  # Network interface.
+      case "$LINE" in
+       *DNS\ Servers:\ *) ;;
+       *) ISSR=1 ;;  # Fall back to NetworkManager.
+      esac
+    fi
+    if test "$ISSR" = 1; then  # NetworkManager (can be dnsmasq, systemd-resolved or manual).
+      # https://askubuntu.com/a/1298994
+      # This works in Ubuntu >=15.04. For Ubuntu 14.04, see command on the answer link above.
+      # Example output of nmcli: 12.34.56.78 | 90.123.45.6
+      LINE="$(nmcli -f IP4.DNS -t -m tabular dev show 2>/dev/null |
+          perl -ne 'if (m@^\d+(?=[.])[\d. |]+[.]\d+$@) { chomp; for (split(m@ *[|] *@, $_)) { print "nameserver $_\n" } }')"
+      test "$LINE" && ISSR=
+    fi
+    if test "$ISSR"; then
+      echo "fatal: local DNS server found ($B), could not figure out real DNS servers" >&2
+      exit 2
+    fi
   else
     LINE="$(cat /etc/resolv.conf)"
   fi
@@ -296,6 +320,7 @@ WantedBy=multi-user.target
     ln -s /etc/systemd/system/container-network.service "$CONAME".container/rootfs/etc/systemd/system/multi-user.target.wants/container-network.service || exit 2
   fi
   # !! --network-interface= implies --private-network, so systemd-nspawn doesn't try to mess with /etc/resolv.conf, so this hack is not needed.
+  #    undo if not needed (--private-network and --network-interface= don't need it).
   echo '
 [Unit]
 Description=Set up /etc/resolv.conf in container
@@ -388,13 +413,26 @@ iface ${GUESTNETNS}in inet static
   gateway $NETGATEWAY
 " >"$CONAME".container/rootfs/etc/network/interfaces || exit 2;
   # Broadcast is enabled by default, no need for `broadcast +'.
+  # !! mount and umount to busybox
+  # Maybe docker tries to bind-mount /proc to the container (and that won't work):
+  #   Dec 10 11:58:37 co18 dockerd[98]: time='2020-12-10T11:58:37Z' level=error msg='failed to disable IPv6 forwarding for container's interface all: open /proc/sys/net/ipv6/conf/all/disable_ipv6: read-only file system'
+  #   (! test -f /etc/proc/sys/net/ipv6/conf/all/disable_ipv6 || mount --bind /etc/proc/sys/net/ipv6/conf/all/disable_ipv6 /proc/sys/net/ipv6/conf/all/disable_ipv6) &&  # For Docker. Doesn't help.
+  #   (! test -f /etc/proc/sys/net/ipv6/conf || mount --bind /etc/proc/sys/net/ipv6/conf/all/disable_ipv6 /proc/sys/net/ipv6/conf) &&  # For Docker. Doesn't help.
   echo "
+if test -f /proc/sys/net/ipv4/ip_forward && ! (: 2>/dev/null >>/proc/sys/net/ipv4/ip_forward); then
+  # Workaround for systemd 229: Read-only filesystem.
+  test -d /etc/proc || mkdir /etc/proc
+  mount proc /etc/proc -t proc &&
+  (! test -f /etc/proc/sys/net/ipv4/ip_forward || mount --bind /etc/proc/sys/net/ipv4/ip_forward /proc/sys/net/ipv4/ip_forward) &&  # For Docker.
+  (! test -f /etc/proc/sys/net/ipv6/conf/all/disable_ipv6 || mount --bind /etc/proc/sys/net/ipv6/conf/all/disable_ipv6 /proc/sys/net/ipv6/conf/all/disable_ipv6) &&  # For Docker. Doesn't help.
+  umount /etc/proc
+fi
 /etc/busybox.conconj ifconfig '${GUESTNETNS}in' '$GUESTIP' netmask '$NETMASK' up || exit \$?
 /etc/busybox.conconj route add default gw '$NETGATEWAY' || exit \$?
 " >"$CONAME".container/rootfs/etc/netup.container || exit 2
   set x --network-interface="$GUESTNETNS"in "$@"; shift
   # Undo incorrect setup_resolv_conf() magic in systemd-nspawn, which may
-  # bind-mount or overwrite /etc/resolv.conf .  !! undo
+  # bind-mount or overwrite /etc/resolv.conf .  !! undo if not needed (--private-network and --network-interface= don't need it).
   : >>"$CONAME".container/rootfs/etc/resolv.conf.container.start || exit 2  # Create.
 fi
 
@@ -425,6 +463,7 @@ test "$CMD" = start-shell || BOOTARG=--boot
 set x $BOOTARG --directory="$CONAME".container/rootfs \
     $BM --bind-ro="$(pwd)"/busybox.conconj:/etc/busybox.conconj \
     --capability=CAP_SYS_MODULE,CAP_NET_ADMIN \
+    --bind=/proc/sys/net/ipv4:/var/ipv4 \
     --bind=/sys/fs/cgroup --machine="$CONAME" "$@"; shift
 # With --private-users=no, container systemd freezes with: ``Failed to allocate manager object, freezing.''.
 export SYSTEMD_NSPAWN_USE_CGNS=0  # Needed by Docker.

@@ -9,10 +9,12 @@ BEGIN { $^W = 1 } use integer; use strict;
 die "Usage: $0 <source-systemd-nspawn> <destination-systemd-nspawn>\n" if @ARGV != 2;
 
 # Linux capabilities.
+sub CAP_SYS_ADMIN()  {21}
+sub CAP_SYS_BOOT()   {22}
 sub CAP_SYSLOG()     {34}
 sub CAP_SYS_MODULE() {16}
-sub CAP_SYS_PTRACE() {19}
 sub CAP_SYS_PACCT()  {20}
+sub CAP_SYS_PTRACE() {19}
 sub CAP_SYS_RAWIO()  {17}
 sub CAP_SYS_TIME()   {25}
 
@@ -36,7 +38,7 @@ my %SCMP_SYS = qw(
 # From systemd-232/src/nspawn/nspawn-seccomp.c
 # in systemd_232.orig.tar.gz with patches from systemd_232-25+deb9u12.debian.tar.xz
 # for Debian 9 on Linux (amd64, should be architecture-independent).
-my @blacklist = (
+my @blacklist1 = (
     [0,              $SCMP_SYS{_sysctl}],              # obsolete syscall
     [0,              $SCMP_SYS{add_key}],              # keyring is not namespaced
     [0,              $SCMP_SYS{afs_syscall}],          # obsolete syscall
@@ -96,10 +98,40 @@ my @blacklist = (
     [CAP_SYS_TIME,   $SCMP_SYS{settimeofday}],
     [CAP_SYS_TIME,   $SCMP_SYS{stime}],
 );
+
+# From systemd-229/src/nspawn/nspawn.c
+# in systemd_229.orig.tar.gz with patches from systemd_229-4ubuntu21.29.debian.tar.xz
+# for Ubuntu 16.04 on Linux (amd64, should be architecture-independent).
+#
+# FYI No syscalls to enable here.
+my @blacklist2 = (
+    [CAP_SYS_RAWIO,  $SCMP_SYS{iopl}],
+    [CAP_SYS_RAWIO,  $SCMP_SYS{ioperm}],
+    [CAP_SYS_BOOT,   $SCMP_SYS{kexec_load}],
+    [CAP_SYS_ADMIN,  $SCMP_SYS{swapon}],
+    [CAP_SYS_ADMIN,  $SCMP_SYS{swapoff}],
+    [CAP_SYS_ADMIN,  $SCMP_SYS{open_by_handle_at}],
+    [CAP_SYS_MODULE, $SCMP_SYS{init_module}],
+    [CAP_SYS_MODULE, $SCMP_SYS{finit_module}],
+    [CAP_SYS_MODULE, $SCMP_SYS{delete_module}],
+    [CAP_SYSLOG,     $SCMP_SYS{syslog}],
+);
+
 my %syscalls_to_enable = map { $SCMP_SYS{$_} => 1 } qw(add_key keyctl);  # For Docker.
 
-# C array of: uint64_t capability; int32_t syscall_num; uint32_t zeropad;
-my $data = join("", map { pack("Vx4Vx4", @$_) } @blacklist);
+sub get_blacklist_data($) {
+  my $fn = $_[0];
+  for my $blacklist (\@blacklist1, \@blacklist2) {
+    # C array of: uint64_t capability; int32_t syscall_num; uint32_t zeropad;
+    my $data = join("", map { die "$0: fatal: unknown syscall\n" if !defined($_->[1]); pack("Vx4Vx4", @$_) } @$blacklist);
+    my $i = index($_, $data);
+    next if $i < 0;
+    die "$0: fatal: multiple blacklists found\n" if index($_, $data, $i + 1) >= 0;
+    return ($blacklist, $data, $i);
+  }
+  die "$0: fatal: blacklist not found: $fn\n";
+}
+
 my $fn = $ARGV[0];
 { die "$0: fatal: open: $fn: $!\n" if !open(my($f), "<", $fn);
   local $/ = undef;
@@ -107,10 +139,8 @@ my $fn = $ARGV[0];
   die "$0: fatal: read: $fn: $!\n" if !defined($_);  # Can it happen?
   die "$0: fatal: close: $fn: $!\n" if !close($f);
 }
-my $i = index($_, $data);
-die "$0: fatal: blacklist not found: $fn\n" if $i < 0;
-die "$0: fatal: multiple blacklists found\n" if index($_, $data, $i + 1) >= 0;
-my $data2 = join("", map { $_ = [0, -1] if exists($syscalls_to_enable{$_->[1]}); pack("Vx4Vx4", @$_) } @blacklist);
+my($blacklist, $data, $i) = get_blacklist_data($fn);
+my $data2 = join("", map { $_ = [0, -1] if exists($syscalls_to_enable{$_->[1]}); pack("Vx4Vx4", @$_) } @$blacklist);
 substr($_, $i, length($data2)) = $data2;
 my $fn2 = $ARGV[1];
 unlink($fn2);  # Avoid ``Text file busy'' error.
