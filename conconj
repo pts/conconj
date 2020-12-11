@@ -6,17 +6,13 @@
 # TODO(pts): sudo apt-get install -y systemd-container  # For systemd-nspawn.
 # TODO(pts): sudo apt-get install -y iproute2  # For ip.
 # TODO(pts): in-container: sudo apt-get install systemd-sysv
-# TODO(pts): in-container: sudo apt-get install -y kmod  # For modprobe. To get rid of systemd startup errors.
+# TODO(pts): in-container: sudo apt-get install -y kmod  # For modprobe. To get rid of systemd startup errors. Also strongly recommended for docker.
 # TODO(pts): in-container: sudo apt-get install -y iputils-ping  # For ping. (But busybox can also have it.)
 # TODO(pts): in-container: sudo apt-get install -y docker.io kmod  # For docker.
 # TODO(pts): systemd-nspawn --notify-ready=
-# TODO(pts): (apt-get install modprobe?) kmod-static-nodes.service: Main process exited, code=exited, status=203/EXEC
-#            [FAILED] Failed to start Create list of requ…vice nodes for the current kernel.
 # !! TODO(pts): feature: networking mode nat: virtual bridge with NAT
 # !! TODO(pts): Test DNS and Docker in Debian 7 (sysvinit).
-# !! TODO(pts): Does modprobe actually work (e.g. aufs)? Or do we need to adjust --system-call-filter=...?
 # !! TODO(pts): Rename GUEST to CON.
-# !! TODO(pts): Look at error messages from dockerd, install kmod (modprobe) etc.
 # !! TODO(pts): doc: Debian: this is normal: -- make it optional
 #               Failed to mount n/a on /tmp/runc/co18.container/rootfs/sys/fs/selinux (MS_BIND ""): No such file or directory
 #               Failed to mount n/a on /tmp/runc/co18.container/rootfs/sys/fs/selinux (MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC|MS_REMOUNT|MS_BIND ""): Invalid argument
