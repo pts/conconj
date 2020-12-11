@@ -10,6 +10,7 @@
 # TODO(pts): in-container: sudo apt-get install -y iputils-ping  # For ping. (But busybox can also have it.)
 # TODO(pts): in-container: sudo apt-get install -y docker.io kmod  # For docker.
 # TODO(pts): systemd-nspawn --notify-ready=
+# !! TODO(pts): don't follow symlinks up when overwriting files in container rootfs
 # !! TODO(pts): feature: networking mode nat: virtual bridge with NAT
 # !! TODO(pts): Test DNS and Docker in Debian 7 (sysvinit).
 # !! TODO(pts): Rename GUEST to CON.
