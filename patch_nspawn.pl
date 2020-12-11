@@ -132,6 +132,7 @@ my @blacklists = ([
 ]);
 
 my %syscalls_to_enable = map { $SCMP_SYS{$_} => 1 } qw(add_key keyctl);  # For Docker.
+my %syscalls_to_enable_uc = map { $SCMP_SYS{$_} => 1 } qw(init_module finit_module delete_module);  # For Docker.
 
 sub serialize_blacklist($) {
   my $blacklist = $_[0];
@@ -167,6 +168,9 @@ my $fn = $ARGV[0];
   die "$0: fatal: close: $fn: $!\n" if !close($f);
 }
 my($blacklist, $i) = get_blacklist_data($fn);
+if (@$blacklist and @{$blacklist->[0]} == 1) {
+  for my $key (keys(%syscalls_to_enable_uc)) { $syscalls_to_enable{$key} = 1 }
+}
 # Enable a syscall by replacing the syscall number with -1 in the blacklist.
 my @blacklistb = map { exists($syscalls_to_enable{$_->[1]}) ? [@$_[0 .. $#$_ - 1], -1] : $_ } @$blacklist;
 my $data = serialize_blacklist(\@blacklistb);
