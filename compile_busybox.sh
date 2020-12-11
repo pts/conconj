@@ -386,7 +386,7 @@ patch -p0 <<'ENDPATCH'
 +# CONFIG_FEATURE_SPLIT_FANCY is not set
 +# CONFIG_STAT is not set
 +# CONFIG_FEATURE_STAT_FORMAT is not set
-+# CONFIG_STTY is not set
++CONFIG_STTY=y
 +# CONFIG_SUM is not set
 +# CONFIG_SYNC is not set
 +# CONFIG_TAC is not set
@@ -671,14 +671,14 @@ patch -p0 <<'ENDPATCH'
 +# CONFIG_MKSWAP is not set
 +# CONFIG_FEATURE_MKSWAP_UUID is not set
 +# CONFIG_MORE is not set
-+# CONFIG_MOUNT is not set
++CONFIG_MOUNT=y
 +# CONFIG_FEATURE_MOUNT_FAKE is not set
 +# CONFIG_FEATURE_MOUNT_VERBOSE is not set
 +# CONFIG_FEATURE_MOUNT_HELPERS is not set
 +# CONFIG_FEATURE_MOUNT_LABEL is not set
 +# CONFIG_FEATURE_MOUNT_NFS is not set
 +# CONFIG_FEATURE_MOUNT_CIFS is not set
-+# CONFIG_FEATURE_MOUNT_FLAGS is not set
++CONFIG_FEATURE_MOUNT_FLAGS=y
 +# CONFIG_FEATURE_MOUNT_FSTAB is not set
 +# CONFIG_PIVOT_ROOT is not set
 +# CONFIG_RDATE is not set
@@ -825,9 +825,9 @@ patch -p0 <<'ENDPATCH'
 +# CONFIG_NC_SERVER is not set
 +# CONFIG_NC_EXTRA is not set
 +# CONFIG_NC_110_COMPAT is not set
-+# CONFIG_PING is not set
++CONFIG_PING=y
 +# CONFIG_PING6 is not set
-+# CONFIG_FEATURE_FANCY_PING is not set
++CONFIG_FEATURE_FANCY_PING=y
 +# CONFIG_WHOIS is not set
 +# CONFIG_FEATURE_IPV6 is not set
 +# CONFIG_FEATURE_UNIX_LOCAL is not set
@@ -837,7 +837,7 @@ patch -p0 <<'ENDPATCH'
 +# CONFIG_ARPING is not set
 +# CONFIG_BRCTL is not set
 +# CONFIG_FEATURE_BRCTL_FANCY is not set
-+# CONFIG_FEATURE_BRCTL_SHOW is not set
++CONFIG_FEATURE_BRCTL_SHOW=y
 +# CONFIG_DNSD is not set
 +# CONFIG_ETHER_WAKE is not set
 +# CONFIG_FAKEIDENTD is not set
