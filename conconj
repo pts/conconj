@@ -157,13 +157,15 @@ if test -z "$NETGATEWAY"; then
   exit 2
 fi
 
-UR=
-read UR </proc/sys/kernel/osrelease  # It's OK to fail.
-if test "$UR" && test -d /lib/modules/"$UR"; then
-  BM="--bind-ro /lib/modules/$UR"
-else
-  # TODO(pts): Disallow whitespace in $UR.
-  BM=
+BM=
+if test -e "$CONAME".container/rootfs/sbin/modprobe; then
+  # !! TODO(pts): Disable this if CAP_SYS_MODULE is not used.
+  UR=
+  read UR </proc/sys/kernel/osrelease  # It's OK to fail.
+  if test "$UR" && test -d /lib/modules/"$UR"; then
+    # TODO(pts): Disallow whitespace in $UR.
+    BM="--bind-ro /lib/modules/$UR"
+  fi
 fi
 
 if test "$GUESTIP" = private; then
