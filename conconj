@@ -10,10 +10,10 @@
 # TODO(pts): in-container: sudo apt-get install -y iputils-ping  # For ping. (But busybox can also have it.)
 # TODO(pts): in-container: sudo apt-get install -y docker.io kmod  # For docker.
 # TODO(pts): systemd-nspawn --notify-ready=
+# !! TODO(pts): Clean up network linterfaces (ip link) upon container exit in both shell and poweroff. (Can the kernel do it by linking them?)
 # !! TODO(pts): don't follow symlinks up when overwriting files in container rootfs
 # !! TODO(pts): feature: networking mode nat: virtual bridge with NAT
 # !! TODO(pts): Test DNS and Docker in Debian 7 (sysvinit).
-# !! TODO(pts): Rename GUEST to CON.
 # !! TODO(pts): doc: Debian: this is normal: -- make it optional
 #               Failed to mount n/a on /tmp/runc/co18.container/rootfs/sys/fs/selinux (MS_BIND ""): No such file or directory
 #               Failed to mount n/a on /tmp/runc/co18.container/rootfs/sys/fs/selinux (MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC|MS_REMOUNT|MS_BIND ""): Invalid argument
@@ -21,7 +21,7 @@
 # !! TODO(pts): The --bind /shared directory.
 # !! TODO(pts): timezone -- which packages are needed?
 # !! TODO(pts): /etc/default/locale ?
-# !! TODO(pts): Add "$HOSTNETIP host" to /etc/hosts , also copy from/to host /etc/hosts
+# !! TODO(pts): Add "$HOSTNETIP host" or "$LOCALNETIP host" to /etc/hosts , also copy from/to host /etc/hosts
 # !! TODO(pts): Add other type of networking: same-as-host (bind on the same port won't work), private, separate-ip (currently implemented), to-host, to-host-and-containers, host (-n, may include masquerade; only works if the container is also running systemd (because of DHCP client); no communication with other containers).
 #
 
@@ -116,14 +116,22 @@ if ! perl -e0 2>/dev/null; then
   echo "fatal: perl doesn't work" >&2
   exit 2
 fi
-if ! read HOSTNETIP <conconj.hostnet 2>/dev/null; then  # !! rename
+CONIP=
+read CONIP <"$CONAME".container/ipaddr 2>/dev/null ||:
+HOSTNETIP=; LOCALNETIP=
+case "$CONIP" in
+ private | shared) ;;
+ [1-9]*) HOSTNETIP=. ;;
+ local.[1-9]*) LOCALNETIP=. ;;
+ "") echo "fatal: missing per-container ipaddr config file: $CODIR/$CONAME.container/ipaddr" >&2; exit 2 ;;
+ *) echo "fatal: bad IP address syntax in per-contaier ipaddr config file: $CONAME.container/ipaddr: $CONIP" >&2; exit 2 ;;
+esac
+if test "$HOSTNETIP" && ! read HOSTNETIP 2>/dev/null <conconj.hostnet; then
   echo "fatal: missing or empty: $CODIR/conconj.hostnet"
   exit 2
 fi
-GUESTIP=
-read GUESTIP <"$CONAME".container/ipaddr 2>/dev/null ||:
-if test -z "$GUESTIP"; then
-  echo "fataL: missing per-container ipaddr config file: $CODIR/$CONAME.container/ipaddr" >&2
+if test "$LOCALNETIP" && ! read LOCALNETIP 2>/dev/null <conconj.localnet; then
+  echo "fatal: missing or empty: $CODIR/conconj.localnet"
   exit 2
 fi
 
@@ -131,27 +139,43 @@ fi
 
 chown 0.0 "$CONAME".container/rootfs || exit 2
 
-# Example: HOSTNETIP=192.168.0.90 NETDEV=wlp2s0
-NETDEV="$(ip -o addr | perl -we 'use integer; use strict;
-    die "fatal: bad hostnetip: $ARGV[0]" if $ARGV[0] !~ m@\A(\d+)[.](\d+)[.](\d+)[.](\d+)(?:/32)?\Z(?!\n)@;
-    my $hostnetip = unpack("N", pack("C4", $1, $2, $3, $4));
-    my $netdev; my $netmaskbits; my $netmask;
-    while (<STDIN>) { chomp; my @l = split; if (@l > 3 and $l[2] eq "inet" and $l[1] ne "lo" and $l[3] =~ m@\A(\d+)[.](\d+)[.](\d+)[.](\d+)/(\d+)\Z(?!\n)@ and $5 != 32 and $5 >= 8 and $5 <= 32) {
-      my $ip = unpack("N", pack("C4", $1, $2, $3, $4)); my $mask = unpack("N", pack("N", -1 << (32 - $5))); if (($ip & $mask) == ($hostnetip & $mask)) {
-        die "fatal: multiple network devices for hostnetip: $ARGV[0]\n" if defined($netdev);  # The $5 != 32 check above ensures that hostnet is ignored here.
-        $netdev = $l[1]; $netmaskbits = $5; $netmask = $mask; } } }
-    die "fatal: missing network device for hostnetip: $ARGV[0]\n" if !defined($netdev);
-    $netmask = join(".", unpack("C4", pack("N", $netmask)));
-    print "NETDEV=\x27$netdev\x27; NETMASKBITS=\x27$netmaskbits\x27; NETMASK=\x27$netmask\x27\n"' -- "$HOSTNETIP")"
-test "$NETDEV" || exit 2
-eval "$NETDEV"  # Set NETDEV=...; NETMASKBITS=...; NETMASK=...
-test "$NETDEV" || exit 2
-test "$NETMASKBITS" || exit 2
-
-NETGATEWAY="$(ip route | while read A B C D; do test "$A" = default && test "$B" = via && echo "$C" && break; done)"
-if test -z "$NETGATEWAY"; then
-  echo "fatal: missing default gateway" >&2
-  exit 2
+# TODO(pts): Don't do these if "$CONIP" = private etc. (?)
+NETGATEWAY="$(ip route | while read A B C D; do
+      if test "$A" = default && test "$B" = via; then
+        case "$C" in *[!0-9.]*) ;; *) echo "$C"; break ;; esac
+      fi
+    done)"
+NETDEVIP="$HOSTNETIP"
+test "$NETDEVIP" || NETDEVIP="$NETGATEWAY"
+NETDEV=; NETMASKBITS=; NETMASK=;
+if test "$NETDEVIP"; then
+  # Example: NETDEVIP=192.168.0.90 NETDEV=wlp2s0
+  NETDEV="$(ip -o addr | perl -we 'use integer; use strict;
+      die "fatal: bad netdevip: $ARGV[0]" if $ARGV[0] !~ m@\A(\d+)[.](\d+)[.](\d+)[.](\d+)(?:/32)?\Z(?!\n)@;
+      my $netdevip = unpack("N", pack("C4", $1, $2, $3, $4));
+      my $netdev; my $netmaskbits; my $netmask;
+      while (<STDIN>) { chomp; my @l = split; if (@l > 3 and $l[2] eq "inet" and $l[1] ne "lo" and $l[3] =~ m@\A(\d+)[.](\d+)[.](\d+)[.](\d+)/(\d+)\Z(?!\n)@ and $5 != 32 and $5 >= 8 and $5 <= 32) {
+        my $ip = unpack("N", pack("C4", $1, $2, $3, $4)); my $mask = unpack("N", pack("N", -1 << (32 - $5))); if (($ip & $mask) == ($netdevip & $mask)) {
+          die "fatal: multiple network devices for netdevip: $ARGV[0]\n" if defined($netdev);  # The $5 != 32 check above ensures that cc-hostnet is ignored here.
+          $netdev = $l[1]; $netmaskbits = $5; $netmask = $mask; } } }
+      die "fatal: missing network device for netdevip: $ARGV[0]\n" if !defined($netdev);
+      $netmask = join(".", unpack("C4", pack("N", $netmask)));
+      print "NETDEV=\x27$netdev\x27; NETMASKBITS=\x27$netmaskbits\x27; NETMASK=\x27$netmask\x27\n"' -- "$NETDEVIP")"
+  test "$NETDEV" || exit 2
+  eval "$NETDEV"  # Set NETDEV=...; NETMASKBITS=...; NETMASK=...
+  test "$NETDEV" || exit 2
+  test "$NETMASKBITS" || exit 2
+  test "$NETMASK" || exit 2
+fi
+HOSTNETDEV="$NETDEV"
+if test "$LOCALNETIP"; then
+  perl -e 'die "fatal: bad localnetip: $ARGV[0]" if $ARGV[0] !~ m@\A(\d+)[.](\d+)[.](\d+)[.](\d+)(?:/32)?\Z(?!\n)@' -- "$LOCALNETIP" || exit 2
+  NETDEV=; NETMASKBITS=24; NETMASK=255.255.255.0; NETGATEWAY=;
+  NETNETIP="${LOCALNETIP%.*}.0"; NETBRIP="${LOCALNETIP%.*}.1"; CONIP="${LOCALNETIP%.*}.${CONIP##*.}"
+  if test "$NETNETIP" = "$NETBRIP" || test "$NETNETIP" = "$LOCALNETIP" || test "$NETNETIP" = "$CONIP" || test "$NETBRIP" = "$LOCALNETIP" || test "$NETBRIP" = "$CONIP" || test "$LOCALNETIP" = "$CONIP"; then
+    echo "fatal: IP addresses must be different: net=$NETNETIP bridge=$NETBRIP host=$LOCALNETIP container=$CONIP" >&2
+    exit 2
+  fi
 fi
 
 BM=
@@ -165,7 +189,7 @@ if test -e "$CONAME".container/rootfs/sbin/modprobe; then
   fi
 fi
 
-if test "$GUESTIP" = private; then
+if test "$CONIP" = private; then
   LINE=""  # No DNS servers in the container please.
 else
   ISSR=
@@ -179,7 +203,7 @@ else
     if test "$ISSR" = 2; then  # systemd-resolved.
       # systemd-resolve: systemd 237, Ubuntu 18.04
       # resolvectl: systemd 245.4, Ubuntu 20.04
-      LINE="$(systemd-resolve --status "$NETDEV" 2>/dev/null || resolvectl --status "$NETDEV" 2>/dev/null)"  # Network interface.
+      LINE="$(systemd-resolve --status "$HOSTNETDEV" 2>/dev/null || resolvectl --status "$HOSTNETDEV" 2>/dev/null)"  # Network interface.
       case "$LINE" in
        *DNS\ Servers:\ *) ISSR= ;;
        *) ISSR=1 ;;  # Fall back to NetworkManager.
@@ -277,13 +301,6 @@ perl -pi -0777 -we '
     substr($_, 0, 0) = $cmd;
     ' "$CONAME".container/rootfs/etc/profile || exit 2
 
-(ip -o addr show hostnet 2>/dev/null | while read A B C D E; do
-  if test "$B" = hostnet && test "$C" = inet && test "$D" != "$HOSTNETIP/32"; then
-    echo "fatal: device hostnet already up, with IP address ${D%/*}, should be: $HOSTNETIP" >&2
-    exit 2
-  fi
-done) || exit 2
-
 # Undo incorrect setup_resolv_conf() magic in systemd-nspawn, which may
 # bind-mount or overwrite /etc/resolv.conf .
 # This affects the `start' command (--boot).
@@ -357,10 +374,9 @@ fi
   # systemctl status container-resolv-conf.service
 fi
 
-GUESTNETNS=guest."$CONAME"
 
 rm -f "$CONAME".container/rootfs/etc/resolv.conf.container.start || exit 2
-if test "$GUESTIP" = shared; then
+if test "$CONIP" = shared; then
   test -d "$CONAME".container/rootfs/etc/network || mkdir "$CONAME".container/rootfs/etc/network || exit 2
   echo "#conconj shared" >"$CONAME".container/rootfs/etc/network/interfaces || exit 2;
   echo "#conconj shared" >"$CONAME".container/rootfs/etc/netup.container || exit 2
@@ -369,99 +385,174 @@ if test "$GUESTIP" = shared; then
   # host).
   # !! disable systemd-resolved.service, to avoid warning: Dec 09 17:18:41 co92 systemd-resolved[30]: Another process is already listening on TCP socket 127.0.0.53:53.
   #    do we need to bind-mount a dummy one to /lib/systemd/system/systemd-resolved.service -- or does /etc take precedence?
-elif test "$GUESTIP" = private; then
+elif test "$CONIP" = private; then
   test -d "$CONAME".container/rootfs/etc/network || mkdir "$CONAME".container/rootfs/etc/network || exit 2
   echo "#conconj private" >"$CONAME".container/rootfs/etc/network/interfaces || exit 2;
   echo "#conconj private" >"$CONAME".container/rootfs/etc/netup.container || exit 2
   set x --private-network "$@"; shift
 else
-  ISMV=
-  if ! ip link show hostnet >/dev/null 2>&1; then
-    # https://unix.stackexchange.com/q/622914
-    # `type macvlan' works on Etherenet only (no wifi), `type ipvlan mode l2' works everywhere.
-    # ipvlan vs macvlan: https://sreeninet.wordpress.com/2016/05/29/macvlan-and-ipvlan/
-    if test "$ISMV" || ! ip link add name hostnet link "$NETDEV" type ipvlan mode l2 2>/dev/null; then
-      # Debian 8 doesn't have ipvlan (not even ipvlan.ko), so we fall back
-      # to macvlan. Network won't work (not even from host) over wifi.
-      ISMV=1
-      if ! ip link add name hostnet link "$NETDEV" type macvlan; then
-        # If the error message is `RTNETLINK answers: Device or resource
-        # busy', then it may be a macvlan--ipvlan incompatibility. Solve it
-        # by stopping all containers, then running `sudo ip link del dev ...'
-        # on all guest.... devices including hostnet.
-        echo "fatal: error creating network device: hostnet" >&2
+  CONNETIF=cc."$CONAME"
+  if test "$HOSTNETIP"; then
+    (ip -o addr show cc-hostnet 2>/dev/null | while read A B C D E; do
+      if test "$B" = cc-hostnet && test "$C" = inet && test "$D" != "$HOSTNETIP/32"; then
+        echo "fatal: device cc-hostnet already up, with IP address ${D%/*}, should be: $HOSTNETIP" >&2
         exit 2
       fi
+    done) || exit 2
+
+    ISMV=
+    if ! ip link show cc-hostnet >/dev/null 2>&1; then
+      # https://unix.stackexchange.com/q/622914
+      # `type macvlan' works on Etherenet only (no wifi), `type ipvlan mode l2' works everywhere.
+      # ipvlan vs macvlan: https://sreeninet.wordpress.com/2016/05/29/macvlan-and-ipvlan/
+      if test "$ISMV" || ! ip link add name cc-hostnet link "$NETDEV" type ipvlan mode l2 2>/dev/null; then
+        # Debian 8 doesn't have ipvlan (not even ipvlan.ko), so we fall back
+        # to macvlan. Network won't work (not even from host) over wifi.
+        ISMV=1
+        if ! ip link add name cc-hostnet link "$NETDEV" type macvlan; then
+          # If the error message is `RTNETLINK answers: Device or resource
+          # busy', then it may be a macvlan--ipvlan incompatibility. Solve it
+          # by stopping all containers, then running `sudo ip link del dev ...'
+          # on all conconj.... devices including cc-hostnet.
+          echo "fatal: error creating network device: cc-hostnet" >&2
+          exit 2
+        fi
+      fi
+      ip addr add "$HOSTNETIP"/32 brd + dev cc-hostnet || exit 2
+      ip link set cc-hostnet up || exit 2  # `ip route add' below needs it.
     fi
-    ip addr add "$HOSTNETIP"/32 brd + dev hostnet || exit 2
-    ip link set hostnet up || exit 2  # `ip route add' below needs it.
-  fi
-  ip link del "$GUESTNETNS"in 2>/dev/null ||:
-  # ip -n "$GUESTNETNS" link del "$GUESTNETNS"in 2>/dev/null ||:
-  if test "$GUESTIP"; then
+    ip link del "$CONNETIF" 2>/dev/null ||:
+    # ip -n "$CONNETNS" link del "$CONNETIF" 2>/dev/null ||:
     # TODO(pts): If everything is all right (includin type ...lan), don't
     # make any changes, so that currently running shells would continue
     # working.
-    if test "$ISMV" || ! ip link add name "$GUESTNETNS"in link "$NETDEV" type ipvlan mode l2 2>/dev/null; then
+    if test "$ISMV" || ! ip link add name "$CONNETIF" link "$NETDEV" type ipvlan mode l2 2>/dev/null; then
       # Falling back to macvlan, see above.
       ISMV=1
-      if ! ip link add name "$GUESTNETNS"in link "$NETDEV" type macvlan; then
+      if ! ip link add name "$CONNETIF" link "$NETDEV" type macvlan; then
         # If the error message is `RTNETLINK answers: Device or resource
         # busy', then it may be a macvlan--ipvlan incompatibility. Solve it
         # by stopping all containers, then running `sudo ip link del dev ...'
-        # on all guest.... devices including hostnet.
-        echo "fatal: error creating network device: ${GUESTNETNS}in" >&2
+        # on all conconj.... devices including cc-hostnet.
+        echo "fatal: error creating network device: $CONNETIF" >&2
         exit 2
       fi
     fi
-    test "$(ip route show "$GUESTIP"/32)" && ip route del "$GUESTIP"/32
-    ip route add "$GUESTIP"/32 dev hostnet || exit 2
+    test "$(ip route show "$CONIP"/32)" && ip route del "$CONIP"/32
+    # This route "$HOSTNETIP"/32 isn't added by default, but we don't need it.
+    ip route add "$CONIP"/32 dev cc-hostnet || exit 2
+  elif test "$LOCALNETIP"; then
+    # Using busybox to avoid the need for `apt-get install bridge-utils'.
+    LINE="$(ip link add cb-localnet type bridge 2>&1)"
+    case "$?:$LINE" in
+     0: | *:\ File\ exists) ;;
+     *) echo "$LINE" >&2; echo "fatal: error creating bridge" >&2; exit 2
+    esac
+    LINE=$(ip -o addr show cb-localnet 2>&1 | while read A B C D E; do
+          if test "$C" = inet && test "$D" = "$NETBRIP"/"$NETMASKBITS"; then echo 1
+          else echo 2
+          fi
+        done)
+    if test "$LINE" != 1; then
+      ip addr flush cb-localnet || exit 2
+      ip addr add "$NETBRIP"/"$NETMASKBITS" dev cb-localnet noprefixroute || exit 2
+    fi
+    ip link set cb-localnet up || exit 2  # Doesn't add the route because of noprefixroute above.
+    if ! ip link show cg-localnet >/dev/null 2>&1 ||
+       ! ip link show cc-localnet >/dev/null 2>&1; then
+      ip link del dev cg-localnet 2>/dev/null ||:
+      ip link del dev cc-localnet 2>/dev/null ||:
+      ip link add name cg-localnet type veth peer name cc-localnet || exit 2
+      if ! ip link set dev cg-localnet master cb-localnet; then
+        echo "fatal: error adding cg-localnet to bridge cc-localnet" >&2
+        exit 2
+      fi
+    fi
+    LINE=$(ip -o addr show cc-localnet 2>&1 | while read A B C D E; do
+          if test "$C" = inet && test "$D" = "$LOCALNETIP"/"$NETMASKBITS"; then echo 1
+          elif test "$C" = inet6; then :
+          else echo 2
+          fi
+        done)
+    if test "$LINE" != 1; then
+      ip addr flush cc-localnet || exit 2
+      ip addr add "$LOCALNETIP"/"$NETMASKBITS" brd + dev cc-localnet || exit 2
+    fi
+    ip link set cg-localnet up
+    ip link set cc-localnet up  # Also adds the route.
+    # `ip route del' deletes only one route, so we run it in a loop.
+    # Adding the route is not needed, `ip link set cc-localnet up' has done it.
+    #    while test "$(ip route show "$NETNETIP"/"$NETMASKBITS")"; do ip route del "$NETNETIP"/"$NETMASKBITS"; done
+    #    ip route add "$NETNETIP"/"$NETMASKBITS" dev cc-localnet || exit 2
+
+    ip link del dev cg."$CONAME" 2>/dev/null ||:
+    ip link del dev "$CONNETIF" 2>/dev/null ||:
+    ip link add name cg."$CONAME" type veth peer name "$CONNETIF" || exit 2
+    if ! ip link set dev cg."$CONAME" master cb-localnet; then
+      echo "fatal: error adding cg.$CONAME to bridge cc-localnet" >&2
+      exit 2
+    fi
+    ip link set cg."$CONAME" up
+    #ip link set "$CONNETIF" up
+
+    #set x --network-interface=cg."$CONAME" "$@"; shift  # Breaks `ping' (even adter ifconfig cg."$CONAME" up), don't do it.
+    # !! add NAT
+    # !! add DNS only if NAT
+    # No need for IP forwarding (echo 1 > /proc/sys/net/ipv4/ip_forward)
+    # for the bridge to work.
+  fi
+  if test -z "$NETMASK"; then
+    echo "assert: \$NETMASK not set" >&2
+    exit 2
   fi
 
   # This file is not used directly, it can be used by manually running `ifup -a'
   # after `sudo apt-get install -y ifupdown'.
   test -d "$CONAME".container/rootfs/etc/network || mkdir "$CONAME".container/rootfs/etc/network || exit 2
+  NETGATEWAYH=; test "$NETGATEWAY" || NETGATEWAYH="#"
   echo "#conconj
 auto lo
 iface lo inet loopback
 
-auto ${GUESTNETNS}in
-iface ${GUESTNETNS}in inet static
-  address $GUESTIP
+auto $CONNETIF
+iface $CONNETIF inet static
+  address $CONIP
   netmask $NETMASK
-  gateway $NETGATEWAY
+  ${NETGATEWAYH}gateway $NETGATEWAY
 " >"$CONAME".container/rootfs/etc/network/interfaces || exit 2;
   # Broadcast is enabled by default, no need for `broadcast +'.
-  # !! mount and umount to busybox
-  # Maybe docker tries to bind-mount /proc to the container (and that won't work):
-  #   Dec 10 11:58:37 co18 dockerd[98]: time='2020-12-10T11:58:37Z' level=error msg='failed to disable IPv6 forwarding for container's interface all: open /proc/sys/net/ipv6/conf/all/disable_ipv6: read-only file system'
-  #   (! test -f /etc/proc/sys/net/ipv6/conf/all/disable_ipv6 || mount --bind /etc/proc/sys/net/ipv6/conf/all/disable_ipv6 /proc/sys/net/ipv6/conf/all/disable_ipv6) &&  # For Docker. Doesn't help.
-  #   (! test -f /etc/proc/sys/net/ipv6/conf || mount --bind /etc/proc/sys/net/ipv6/conf/all/disable_ipv6 /proc/sys/net/ipv6/conf) &&  # For Docker. Doesn't help.
   echo "
-if test -f /proc/sys/net/ipv4/ip_forward && ! (: 2>/dev/null >>/proc/sys/net/ipv4/ip_forward); then
-  # Workaround for systemd 229: Read-only filesystem.
-  test -d /etc/proc || mkdir /etc/proc
-  mount proc /etc/proc -t proc &&
-  (! test -f /etc/proc/sys/net/ipv4/ip_forward || mount --bind /etc/proc/sys/net/ipv4/ip_forward /proc/sys/net/ipv4/ip_forward) &&  # For Docker.
-  (! test -f /etc/proc/sys/net/ipv6/conf/all/disable_ipv6 || mount --bind /etc/proc/sys/net/ipv6/conf/all/disable_ipv6 /proc/sys/net/ipv6/conf/all/disable_ipv6) &&  # For Docker. Doesn't help.
-  umount /etc/proc
-fi
-/etc/busybox.conconj ifconfig '${GUESTNETNS}in' '$GUESTIP' netmask '$NETMASK' up || exit \$?
-/etc/busybox.conconj route add default gw '$NETGATEWAY' || exit \$?
+/etc/busybox.conconj ifconfig '$CONNETIF' '$CONIP' netmask '$NETMASK' up || exit \$?
+${NETGATEWAYH}/etc/busybox.conconj route add default gw '$NETGATEWAY' || exit \$?
 " >"$CONAME".container/rootfs/etc/netup.container || exit 2
-  set x --network-interface="$GUESTNETNS"in "$@"; shift
+  set x --network-interface="$CONNETIF" "$@"; shift
   # Undo incorrect setup_resolv_conf() magic in systemd-nspawn, which may
   # bind-mount or overwrite /etc/resolv.conf .  !! undo if not needed (--private-network and --network-interface= don't need it).
   : >>"$CONAME".container/rootfs/etc/resolv.conf.container.start || exit 2  # Create.
 fi
 
+# !! mount and umount to busybox
+# Maybe docker tries to bind-mount /proc to the container (and that won't work):
+#   Dec 10 11:58:37 co18 dockerd[98]: time='2020-12-10T11:58:37Z' level=error msg='failed to disable IPv6 forwarding for container's interface all: open /proc/sys/net/ipv6/conf/all/disable_ipv6: read-only file system'
+#   (! test -f /etc/proc/sys/net/ipv6/conf/all/disable_ipv6 || mount --bind /etc/proc/sys/net/ipv6/conf/all/disable_ipv6 /proc/sys/net/ipv6/conf/all/disable_ipv6) &&  # For Docker. Doesn't help.
+#   (! test -f /etc/proc/sys/net/ipv6/conf || mount --bind /etc/proc/sys/net/ipv6/conf/all/disable_ipv6 /proc/sys/net/ipv6/conf) &&  # For Docker. Doesn't help.
+echo "
+    if test -f /proc/sys/net/ipv4/ip_forward && ! (: 2>/dev/null >>/proc/sys/net/ipv4/ip_forward); then
+      # Workaround for systemd 229: Read-only filesystem.
+      test -d /etc/proc || mkdir /etc/proc
+      mount proc /etc/proc -t proc &&
+      (! test -f /etc/proc/sys/net/ipv4/ip_forward || mount --bind /etc/proc/sys/net/ipv4/ip_forward /proc/sys/net/ipv4/ip_forward) &&  # For Docker.
+      (! test -f /etc/proc/sys/net/ipv6/conf/all/disable_ipv6 || mount --bind /etc/proc/sys/net/ipv6/conf/all/disable_ipv6 /proc/sys/net/ipv6/conf/all/disable_ipv6) &&  # For Docker. Doesn't help.
+      umount /etc/proc
+    fi
+" >>"$CONAME".container/rootfs/etc/netup.container || exit 2
 echo "
     if test -f /etc/netup.container; then
       (. /etc/netup.container); XC=\$?
       rm -f /etc/netup.container
       exit \$XC
     fi
-">"$CONAME".container/rootfs/etc/netup.rm.container || exit 2
+" >"$CONAME".container/rootfs/etc/netup.rm.container || exit 2
 test -d "$CONAME".container/rootfs/etc/default || mkdir "$CONAME".container/rootfs/etc/default || exit 2
 # Disable `ifup -a' call in /lib/systemd/system/networking.service
 echo 'CONFIGURE_INTERFACES=no
@@ -480,7 +571,7 @@ fi
 # --capability=all is too much, not needed.
 # By using --network-interface=... (but not --network-namespace-path=...),
 # this is not needed, docker can set it up for itself:
-#   echo 1 | ip netns exec "$GUESTNETNS" tee /proc/sys/net/ipv4/ip_forward >/dev/null || exit 2
+#   echo 1 | ip netns exec "$CONNETNS" tee /proc/sys/net/ipv4/ip_forward >/dev/null || exit 2
 
 BOOTARG=
 test "$CMD" = start-shell || BOOTARG=--boot
