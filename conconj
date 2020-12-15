@@ -172,6 +172,7 @@ if test "$LOCALNETIP"; then
   perl -e 'die "fatal: bad localnetip: $ARGV[0]" if $ARGV[0] !~ m@\A(\d+)[.](\d+)[.](\d+)[.](\d+)(?:/32)?\Z(?!\n)@' -- "$LOCALNETIP" || exit 2
   NETDEV=; NETMASKBITS=24; NETMASK=255.255.255.0; NETGATEWAY=;
   NETNETIP="${LOCALNETIP%.*}.0"; NETBRIP="${LOCALNETIP%.*}.1"; CONIP="${LOCALNETIP%.*}.${CONIP##*.}"
+  NETBRIP=
   if test "$NETNETIP" = "$NETBRIP" || test "$NETNETIP" = "$LOCALNETIP" || test "$NETNETIP" = "$CONIP" || test "$NETBRIP" = "$LOCALNETIP" || test "$NETBRIP" = "$CONIP" || test "$LOCALNETIP" = "$CONIP"; then
     echo "fatal: IP addresses must be different: net=$NETNETIP bridge=$NETBRIP host=$LOCALNETIP container=$CONIP" >&2
     exit 2
@@ -448,14 +449,17 @@ else
      0: | *:\ File\ exists) ;;
      *) echo "$LINE" >&2; echo "fatal: error creating bridge" >&2; exit 2
     esac
-    LINE=$(ip -o addr show cb-localnet 2>&1 | while read A B C D E; do
-          if test "$C" = inet && test "$D" = "$NETBRIP"/"$NETMASKBITS"; then echo 1
-          else echo 2
-          fi
-        done)
-    if test "$LINE" != 1; then
-      ip addr flush cb-localnet || exit 2
-      ip addr add "$NETBRIP"/"$NETMASKBITS" dev cb-localnet noprefixroute || exit 2
+    if test "$NETBRIP"; then  # !!! NETBRIP is always empty, remove
+      LINE=$(ip -o addr show cb-localnet 2>&1 | while read A B C D E; do
+            if test "$C" = inet && test "$D" = "$NETBRIP"/"$NETMASKBITS"; then echo 1
+            else echo 2
+            fi
+          done)
+      if test "$LINE" != 1; then
+        ip addr flush cb-localnet || exit 2
+        # It works (even with forwarding) without a bridge having an IP address.
+        ip addr add "$NETBRIP"/"$NETMASKBITS" dev cb-localnet noprefixroute || exit 2
+      fi
     fi
     ip link set cb-localnet up || exit 2  # Doesn't add the route because of noprefixroute above.
     if ! ip link show cg-localnet >/dev/null 2>&1 ||
