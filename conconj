@@ -14,6 +14,8 @@
 # TODO(pts): in-container: sudo apt-get install -y docker.io kmod  # For docker.
 # TODO(pts): systemd-nspawn --notify-ready=
 # TODO(pts): doc: if the network interface (or link?) is down, then containers on hostnet cannot communicate either
+# TODO(pts): (doc and check) on non-systemd containers (such as Alphine Linux), the shell command fails with: Failed to get shell PTY: Protocol error
+# TODO(pts): how to poweroff busybox init? ./conconj kill alp -s USR2 --kill-who=leader ; (do it automatically if systemd is not detected)
 # !! TODO(pts): Copy over LANG, LC_* etc. to container for the `shell' and start-shell commands if it has locale installed.
 # !! TODO(pts): Clean up network linterfaces (ip link) upon container exit in both shell and poweroff. (Can the kernel do it by linking them?)
 # !! TODO(pts): don't follow symlinks up when overwriting files in container rootfs
@@ -132,9 +134,19 @@ if test "$CMD" = start || test "$CMD" = shell; then
     fi
   fi
 fi
-if test "$CMD" = shell && test $# = 0; then  # machinectl systemd 232 doesn't autodetect /bin/bash.
-  test -f "$CONAME".container/rootfs/bin/bash && set /bin/bash -l
-fi
+
+case "$CMD:$#" in
+ shell:0 | start-shell:0)
+  if test -f "$CONAME".container/rootfs/bin/bash; then
+    # machinectl systemd 232 doesn't autodetect /bin/bash.
+    set /bin/bash -l
+  else  # dash and busybox sh don't use /dev/console by default.
+    # Error messages without this fix:
+    # -sh: can't access tty; job control turned off
+    # -sh: can't open /dev/tty: No such device or address
+    test "$CMD" = start-shell && set /bin/sh -c 'exec <>/dev/console >&0 2>&0; exec /bin/sh -l'
+  fi ;;
+esac
 if test "$CMD" != start && test "$CMD" != start-shell; then
   type machinectl >/dev/null 2>&1 && exec machinectl "$CMD" "$CONAME" "$@"
   MSG=; test -f /etc/debian_version && MSG=", try: sudo apt-get install systemd-container"
