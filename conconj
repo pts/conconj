@@ -14,12 +14,15 @@
 # TODO(pts): in-container: sudo apt-get install -y docker.io kmod  # For docker.
 # TODO(pts): systemd-nspawn --notify-ready=
 # TODO(pts): doc: if the network interface (or link?) is down, then containers on hostnet cannot communicate either
-# TODO(pts): (doc and check) on non-systemd containers (such as Alphine Linux), the shell command fails with: Failed to get shell PTY: Protocol error
+# TODO(pts): (doc and check) on non-systemd containers (such as Alphine Linux), the shell command fails with: Failed to get shell PTY: Protocol error -- because systemd uses D-Bus to get the PTY
 # TODO(pts): how to poweroff busybox init? ./conconj kill alp -s USR2 --kill-who=leader ; (do it automatically if systemd is not detected)
+# TODO(pts): doc: how to poweroff upstart (there is no useful signal handler in /bin/init)? use D-Bus, see upstart-1.12.1/util/shutdown.c
+# TODO(pts): doc: how to poweroff sysvinit: use /dev/initctl or /run/initctl, see upstart-1.12.1/util/shutdown.c
+# TODO(pts): doc: document networking
+# !! TODO(pts): umount /tmp if configured -- or add /etc/rc.local to container /etc/profile + systemd?
+# !! TODO(pts): upon poweroff, detect busybox, and automatically send SIGUSR2
 # !! TODO(pts): Copy over LANG, LC_* etc. to container for the `shell' and start-shell commands if it has locale installed.
-# !! TODO(pts): Clean up network linterfaces (ip link) upon container exit in both shell and poweroff. (Can the kernel do it by linking them?)
 # !! TODO(pts): don't follow symlinks up when overwriting files in container rootfs
-# !! TODO(pts): feature: networking mode nat: virtual bridge with NAT
 # !! TODO(pts): Test DNS and Docker in Debian 7 (sysvinit).
 # !! TODO(pts): doc: Debian: this is normal: -- make it optional
 #               Failed to mount n/a on /tmp/runc/co18.container/rootfs/sys/fs/selinux (MS_BIND ""): No such file or directory
@@ -29,7 +32,6 @@
 # !! TODO(pts): timezone -- which packages are needed?
 # !! TODO(pts): /etc/default/locale ?
 # !! TODO(pts): Add "$HOSTNETIP host" or "$LOCALNETIP host" to /etc/hosts , also copy from/to host /etc/hosts
-# !! TODO(pts): Add other type of networking: same-as-host (bind on the same port won't work), private, separate-ip (currently implemented), to-host, to-host-and-containers, host (-n, may include masquerade; only works if the container is also running systemd (because of DHCP client); no communication with other containers).
 #
 
 if test -z "$CONCONJ_RERUN" && ! (test $# = 0 || test "$1" = --help); then
