@@ -834,7 +834,7 @@ fi
 if test -f "$CONAME".container/rootfs/etc/inittab; then
   if ! perl -ne 'exit(1) if m@^tty\d+:.*getty.*[ t]tty(\d+)$@' <"$CONAME".container/rootfs/etc/inittab; then
     # Prevent busybox init from listening on /dev/tty$N, generating errors.
-    perl -pi -e 's@^@#@ if m@^tty\d+:.*getty.*[ t]tty(\d+)$@' "$CONAME".container/rootfs/etc/inittab
+    perl -pi -e 's@^@#@ if m@^tty\d+:.*getty.*[ t]tty(\d+)$@' "$CONAME".container/rootfs/etc/inittab || exit 2
   fi
 fi
 
