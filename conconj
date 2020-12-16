@@ -751,8 +751,40 @@ $LOCALNETROUTE
   # bind-mount or overwrite /etc/resolv.conf .  !! undo if not needed (--private-network and --network-interface= don't need it).
   : >>"$CONAME".container/rootfs/etc/resolv.conf.container.start || exit 2  # Create.
 fi
+
 #set x --setenv=HOST="$HOST" "$@"; shift  # This doesn't affect command start.
 echo "$HOST" >"$CONAME".container/rootfs/etc/conconj.host || exit 2
+: >>"$CONAME".container/rootfs/etc/hosts  # Create it if needed.
+# Update a few hostnames (%toset) in container /etc/hosts.
+env HOST="$HOST" perl -ni -0777 -we '
+    use integer; use strict;
+    my %toset = ("host" => $ENV{HOST}, "localhost" => "127.0.0.1");
+    my %isset;
+    my $out = "";
+    while (m@\G(\n|.+\n?)@gc) {
+      local $_ = $1;
+      if (m@^#@ or !m@\S@) { $out .= $_; next }
+      $_ .= "\n" if !m@\n@;
+      my @l = split(m@\s+@, $_);
+      my $has_changed = 0;
+      if (@l > 1) {
+        my $ip = shift(@l);
+        my @r = grep { !(!exists($toset{$_}) or (!exists($isset{$_}) and $toset{$_} eq $ip)) } @l;
+        @l = grep {      !exists($toset{$_}) or (!exists($isset{$_}) and $toset{$_} eq $ip) } @l;
+        $has_changed = 1 if @r;
+        if (!@l and @r == 1 and !exists($isset{$r[0]})) {
+          $ip = $toset{$r[0]}; @l = @r;
+        }
+        for my $h (@l) { $isset{$h} = 1 if exists($toset{$h}) }
+        $_ = @l ? "$ip @l\n" : "\n" if $has_changed;
+      }
+      $out .= $_;
+    }
+    for my $h (sort(keys(%toset))) {
+      $out .= "$toset{$h} $h\n" if !exists($isset{$h});
+    }
+    print($out);
+    ' "$CONAME".container/rootfs/etc/hosts
 
 # !! mount and umount to busybox
 # Maybe docker tries to bind-mount /proc to the container (and that won't work):
