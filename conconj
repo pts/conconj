@@ -14,7 +14,6 @@
 # TODO(pts): in-container: sudo apt-get install -y docker.io kmod  # For docker.
 # TODO(pts): systemd-nspawn --notify-ready=
 # TODO(pts): doc: if the network interface (or link?) is down, then containers on hostnet cannot communicate either
-# !! TODO(pts): Add command delnet to remove all network interfaces (ip link del dev ...).
 # !! TODO(pts): Copy over LANG, LC_* etc. to container for the `shell' and start-shell commands if it has locale installed.
 # !! TODO(pts): Clean up network linterfaces (ip link) upon container exit in both shell and poweroff. (Can the kernel do it by linking them?)
 # !! TODO(pts): don't follow symlinks up when overwriting files in container rootfs
@@ -44,10 +43,8 @@ if test "$1" = start || test "$1" = shell || test "$1" = login || test "$1" = po
   if test $# != 1; then
     CMD="$1"; CONAME="$2"; shift; shift
   fi
-elif test "$1" = list; then
-  if test $# = 1; then
-    CMD="$1"; shift
-  fi
+elif test "$1" = list || test "$1" = delnet; then
+  CMD="$1"; shift
 elif test $# = 1 && test "${1#-}" = "$1"; then
   CMD=start; CONAME="$1"; shift
 fi
@@ -63,9 +60,13 @@ Usage: $0 [start] <container-name>
        $0 poweroff <container-name>  # Gracefully, don't wait.
        $0 kill <container-name> [<arg> ...]
        $0 login <container-name>
-       $0 list  # List active containers." >&2
+       $0 list  # List active containers.
+       $0 delnet  # Delete network interfaces and rules." >&2
   exit 1
 fi
+
+CODIR="${0%/*}"
+cd "$CODIR" || exit 2
 
 if test "$CMD" = list; then
   type machinectl >/dev/null 2>&1 && exec machinectl "$CMD" "$@"
@@ -74,11 +75,45 @@ if test "$CMD" = list; then
   exit 2
 fi
 
+if test "$CMD" = delnet; then
+  if test $# != 0; then
+    echo "fatal: too many command-line arguments for: $CMD" >&2
+    exit 1
+  fi
+  A=0
+  for DEV in cc-localnet cg-localnet cb-localnet cc-hostnet; do
+     test "$(ip link show dev "$DEV" 2>/dev/null)" && ! ip link del dev "$DEV" && A=2
+  done
+  # These commands above have removed conconj routes displayed by `ip route show'.
+  #
+  # We don't do `echo 0 >/proc/sys/net/ipv4/ip_forward', because the
+  # original value is lost.
+  #
+  # Also we don't do `iptables -P FORWARD DROP', because the original value
+  # is lost.
+  if type iptables-save >/dev/null 2>&1 &&
+     type iptables-restore >/dev/null 2>&1 &&
+    read LOCALNETIP 2>/dev/null <conconj.localnet && test "$LOCALNETIP"; then
+    # Sync this with the iptables-save code below.
+    LINE="$(iptables-save | NIM="${LOCALNETIP%.*}.0/24" perl -we '
+        use integer; use strict;
+        my $nim = $ENV{NIM}; my $table = ""; my $out = ""; my $chg = 0;
+        while (<STDIN>) {
+          if (m@^[*](.*)$@) { $table = $1 }
+          elsif ($table eq "filter") { if (m@^-A FORWARD(?= ).* -[io] cc-localnet @) { $chg = 1; next } }  # Remove old conconj localnet rule.
+          elsif ($table eq "nat") { if (m@^-A POSTROUTING -s \Q$nim ! -d $nim @) { $chg = 1; next } }  # Remove old conconj localnet rule.
+          $out .= $_;
+        }
+        print $out if $chg;
+        ')"
+     echo "$LINE" | iptables-restore || A=2
+  fi
+  exit "$A"
+fi
+
 case "$CONAME" in
  -* | *[!-._a-zA-Z0-9]* | "") echo "fatal: bad container name: $CONAME"; exit 1 ;;
 esac
-CODIR="${0%/*}"
-cd "$CODIR" || exit 2
 
 if test "$CMD" = start || test "$CMD" = shell; then
   if machinectl show "$CONAME" 2>/dev/null >&2; then  # Early exit.
@@ -463,7 +498,7 @@ else
     done) || exit 2
 
     ISMV=
-    if ! ip link show cc-hostnet >/dev/null 2>&1; then
+    if ! ip link show dev cc-hostnet >/dev/null 2>&1; then
       # https://unix.stackexchange.com/q/622914
       # `type macvlan' works on Etherenet only (no wifi), `type ipvlan mode l2' works everywhere.
       # ipvlan vs macvlan: https://sreeninet.wordpress.com/2016/05/29/macvlan-and-ipvlan/
@@ -515,8 +550,8 @@ else
      *) echo "$LINE" >&2; echo "fatal: error creating bridge" >&2; exit 2
     esac
     ip link set cb-localnet up || exit 2  # Doesn't add the route because of noprefixroute above.
-    if ! ip link show cg-localnet >/dev/null 2>&1 ||
-       ! ip link show cc-localnet >/dev/null 2>&1; then
+    if ! ip link show dev cg-localnet >/dev/null 2>&1 ||
+       ! ip link show dev cc-localnet >/dev/null 2>&1; then
       ip link del dev cg-localnet 2>/dev/null ||:
       ip link del dev cc-localnet 2>/dev/null ||:
       ip link add name cg-localnet type veth peer name cc-localnet || exit 2
