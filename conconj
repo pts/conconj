@@ -15,7 +15,6 @@
 # TODO(pts): systemd-nspawn --notify-ready=
 # TODO(pts): doc: if the network interface (or link?) is down, then containers on hostnet cannot communicate either
 # TODO(pts): (doc and check) on non-systemd containers (such as Alphine Linux), the shell command fails with: Failed to get shell PTY: Protocol error -- because systemd uses D-Bus to get the PTY
-# TODO(pts): how to poweroff busybox init? ./conconj kill alp -s USR2 --kill-who=leader ; (do it automatically if systemd is not detected)
 # TODO(pts): doc: how to poweroff upstart (there is no useful signal handler in /bin/init)? use D-Bus, see upstart-1.12.1/util/shutdown.c
 # TODO(pts): doc: how to poweroff sysvinit: use /dev/initctl or /run/initctl, see upstart-1.12.1/util/shutdown.c
 # TODO(pts): doc: document networking
@@ -151,6 +150,11 @@ case "$CMD:$#" in
   fi ;;
 esac
 if test "$CMD" != start && test "$CMD" != start-shell; then
+  if test "$CMD" = stop; then
+    case "$(readlink "$CONAME".container/rootfs/sbin/init)" in
+     *busybox*) CMD=kill; set x -s USR2 --kill-who=leader; shift ;;
+    esac
+  fi
   type machinectl >/dev/null 2>&1 && exec machinectl "$CMD" "$CONAME" "$@"
   MSG=; test -f /etc/debian_version && MSG=", try: sudo apt-get install systemd-container"
   echo "fatal: command machinectl not found$MSG" >&2
