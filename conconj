@@ -393,7 +393,8 @@ fi
 perl -pi -0777 -we '
     my $cmd = qq(if test -f /etc/resolv.conf.container.start; then umount /etc/resolv.conf 2>/dev/null; rm -f /etc/resolv.conf; cat </etc/resolv.conf.container >/etc/resolv.conf; rm -f /etc/resolv.conf.container.start; :; fi  #conconj\n) .
               qq(if test -f /etc/netup.container; then (. /etc/netup.container); rm -f /etc/netup.container; fi  #conconj\n) .
-              qq(/etc/busybox.conconj stty -echoprt -imaxbel </dev/tty >&0  #conconj\n);  # Workaround for \.../ on backspace in `machinectl shell`.
+              qq(/etc/busybox.conconj stty -echoprt -imaxbel </dev/tty >&0  #conconj\n) .  # Workaround for \.../ on backspace in `machinectl shell`.
+              qq(test -f /bin/ping || test -f /usr/bin/ping || alias ping="/etc/busybox.conconj ping"  #conconj\n);
     1 while s@\A(.*) #conconj\n@@;
     substr($_, 0, 0) = $cmd;
     ' "$CONAME".container/rootfs/etc/profile || exit 2
