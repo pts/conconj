@@ -15,9 +15,8 @@
 # TODO(pts): systemd-nspawn --notify-ready=
 # TODO(pts): doc: if the network interface (or link?) is down, then containers on hostnet cannot communicate either
 # TODO(pts): (doc and check) on non-systemd containers (such as Alphine Linux), the shell command fails with: Failed to get shell PTY: Protocol error -- because systemd uses D-Bus to get the PTY
-# TODO(pts): doc: how to poweroff upstart (there is no useful signal handler in /bin/init)? use D-Bus, see upstart-1.12.1/util/shutdown.c
-# TODO(pts): doc: how to poweroff sysvinit: use /dev/initctl or /run/initctl, see upstart-1.12.1/util/shutdown.c
 # TODO(pts): doc: document networking
+# TODO(pts): `machinectl terminate ...' instead of `machinectl kill ... -s 9'
 # !! TODO(pts): umount /tmp if configured -- or add /etc/rc.local to container /etc/profile + systemd?
 # !! TODO(pts): upon poweroff, detect busybox, and automatically send SIGUSR2
 # !! TODO(pts): Copy over LANG, LC_* etc. to container for the `shell' and start-shell commands if it has locale installed.
@@ -63,6 +62,7 @@ Usage: $0 [start] <container-name>
        $0 show <container-name>
        $0 stop <container-name>  # Gracefully, but don't wait for shutdown.
        $0 kill <container-name> [<arg> ...]
+       $0 kill <container-name> -s 9  # Force kill (SIGKILL) all processes.
        $0 login <container-name>
        $0 list  # List active containers.
        $0 delnet  # Delete network interfaces and rules." >&2
@@ -152,7 +152,10 @@ esac
 if test "$CMD" != start && test "$CMD" != start-shell; then
   if test "$CMD" = stop; then
     case "$(readlink "$CONAME".container/rootfs/sbin/init)" in
+     *systemd*) ;;  # Typically /lib/systemd/systemd .
      *busybox*) CMD=kill; set x -s USR2 --kill-who=leader; shift ;;
+     *) echo "fatal: init system not detected, no way to stop; try: $0 kill $CONAME -s 9" >&2; exit 2
+      ;;  # FYI `machinectl shell "$CONAME" /sbin/shutdown -P' works in sysvinit and upstart (Ubuntu 14.04) as well, but `machinectl shell' and `systemd-run -M' need systemd in the container.
     esac
   fi
   type machinectl >/dev/null 2>&1 && exec machinectl "$CMD" "$CONAME" "$@"
