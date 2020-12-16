@@ -14,7 +14,10 @@
 # TODO(pts): in-container: sudo apt-get install -y docker.io kmod  # For docker.
 # TODO(pts): systemd-nspawn --notify-ready=
 # TODO(pts): doc: if the network interface (or link?) is down, then containers on hostnet cannot communicate either
-# TODO(pts): (doc and check) on non-systemd containers (such as Alphine Linux), the shell command fails with: Failed to get shell PTY: Protocol error -- because systemd uses D-Bus to get the PTY
+# TODO(pts): (doc and check) on non-systemd containers (such as Alphine Linux), the shell command fails with: Failed to get shell PTY: Protocol error -- because systemd uses D-Bus to get the PTY; use Unix-domain sockat with socat
+#            socat server: env -i HOME="$HOME" TERM="$TERM" socat TCP-LISTEN:1337,reuseaddr,fork SYSTEM:'read X; echo "/$X/";exec /bin/bash -l',stderr,pty,setsid
+#            socat client: socat file:`tty`,raw,echo=0 tcp:127.0.0.1:1337
+#            SUXX: doesn't transfer $TERM, doesn't transfer stty -a: rows 24; columns 80
 # TODO(pts): doc: document networking
 # TODO(pts): `machinectl terminate ...' instead of `machinectl kill ... -s 9'
 # !! TODO(pts): umount /tmp if configured -- or add /etc/rc.local to container /etc/profile + systemd?
