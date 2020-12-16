@@ -419,7 +419,8 @@ perl -pi -0777 -we '
     my $cmd = qq(if test -f /etc/resolv.conf.container.start; then umount /etc/resolv.conf 2>/dev/null; rm -f /etc/resolv.conf; cat </etc/resolv.conf.container >/etc/resolv.conf; rm -f /etc/resolv.conf.container.start; :; fi  #conconj\n) .
               qq(if test -f /etc/netup.container; then (. /etc/netup.container); rm -f /etc/netup.container; fi  #conconj\n) .
               qq(/etc/busybox.conconj stty -echoprt -imaxbel </dev/tty >&0  #conconj\n) .  # Workaround for \.../ on backspace in `machinectl shell`.
-              qq(test -f /bin/ping || test -f /usr/bin/ping || alias ping="/etc/busybox.conconj ping"  #conconj\n);
+              qq(test -f /bin/ping || test -f /usr/bin/ping || alias ping="/etc/busybox.conconj ping"  #conconj\n) .
+              qq(test -f /etc/conconj.host && read HOST </etc/conconj.host  #conconj\n);
     1 while s@\A(.*) #conconj\n@@;
     substr($_, 0, 0) = $cmd;
     ' "$CONAME".container/rootfs/etc/profile || exit 2
@@ -500,6 +501,7 @@ fi
 
 rm -f "$CONAME".container/rootfs/etc/resolv.conf.container.start || exit 2
 if test "$CONIP" = shared; then
+  HOST=127.0.0.1
   test -d "$CONAME".container/rootfs/etc/network || mkdir "$CONAME".container/rootfs/etc/network || exit 2
   echo "#conconj shared" >"$CONAME".container/rootfs/etc/network/interfaces || exit 2;
   echo "#conconj shared" >"$CONAME".container/rootfs/etc/netup.container || exit 2
@@ -509,6 +511,7 @@ if test "$CONIP" = shared; then
   # !! disable systemd-resolved.service, to avoid warning: Dec 09 17:18:41 co92 systemd-resolved[30]: Another process is already listening on TCP socket 127.0.0.53:53.
   #    do we need to bind-mount a dummy one to /lib/systemd/system/systemd-resolved.service -- or does /etc take precedence?
 elif test "$CONIP" = private; then
+  HOST=
   test -d "$CONAME".container/rootfs/etc/network || mkdir "$CONAME".container/rootfs/etc/network || exit 2
   echo "#conconj private" >"$CONAME".container/rootfs/etc/network/interfaces || exit 2;
   echo "#conconj private" >"$CONAME".container/rootfs/etc/netup.container || exit 2
@@ -516,6 +519,7 @@ elif test "$CONIP" = private; then
 else
   CONNETIF=cc."$CONAME"
   if test "$HOSTNETIP"; then
+    HOST="$HOSTNETIP"
     (ip -o addr show cc-hostnet 2>/dev/null | while read A B C D E; do
       if test "$B" = cc-hostnet && test "$C" = inet && test "$D" != "$HOSTNETIP/32"; then
         echo "fatal: device cc-hostnet already up, with IP address ${D%/*}, should be: $HOSTNETIP; fix it with: sudo ip link del dev cc-hostnet" >&2
@@ -568,6 +572,7 @@ else
     # stops, but there is no mechanism for that: it will linger around.
     ip route add "$CONIP"/32 dev cc-hostnet || exit 2
   elif test "$LOCALNETIP"; then
+    HOST="$LOCALNETIP"
     # veth + bridge + iptables setup based on: https://superuser.com/a/765078
     # Using busybox to avoid the need for `apt-get install bridge-utils'.
     LINE="$(ip link add cb-localnet type bridge 2>&1)"
@@ -746,6 +751,8 @@ $LOCALNETROUTE
   # bind-mount or overwrite /etc/resolv.conf .  !! undo if not needed (--private-network and --network-interface= don't need it).
   : >>"$CONAME".container/rootfs/etc/resolv.conf.container.start || exit 2  # Create.
 fi
+#set x --setenv=HOST="$HOST" "$@"; shift  # This doesn't affect command start.
+echo "$HOST" >"$CONAME".container/rootfs/etc/conconj.host || exit 2
 
 # !! mount and umount to busybox
 # Maybe docker tries to bind-mount /proc to the container (and that won't work):
