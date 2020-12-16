@@ -818,6 +818,13 @@ if test "$CMD" = start-shell; then
   exit 2
 fi
 
+if test -f "$CONAME".container/rootfs/etc/inittab; then
+  if ! perl -ne 'exit(1) if m@^tty\d+:.*getty.*[ t]tty(\d+)$@' <"$CONAME".container/rootfs/etc/inittab; then
+    # Prevent busybox init from listening on /dev/tty$N, generating errors.
+    perl -pi -e 's@^@#@ if m@^tty\d+:.*getty.*[ t]tty(\d+)$@' "$CONAME".container/rootfs/etc/inittab
+  fi
+fi
+
 exec 9>"$CONAME".container/console.out.tmp </dev/null
 "$@" >&9 2>&9 &  # This generates some shell-specific command-not-found error.
 exec 9>&2
