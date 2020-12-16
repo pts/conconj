@@ -1,15 +1,21 @@
 #!/bin/sh --
+#
+# conconj: Contaniner Conjurer
 # by pts@fazekas.hu at Mon Dec  7 14:58:29 CET 2020
 #
 # Tested on host system: Ubuntu 18.04.
 #
-# TODO(pts): sudo apt-get install -y systemd-container  # For systemd-nspawn.
+# TODO(pts): sudo apt-get install -y systemd-container  # For systemd-nspawn. Sometimes (on Debian 7?) it's in the systemd package.
 # TODO(pts): sudo apt-get install -y iproute2  # For ip.
+# TODO(pts): sudo apt-get install -y iptables  # For iptables.
 # TODO(pts): in-container: sudo apt-get install systemd-sysv
 # TODO(pts): in-container: sudo apt-get install -y kmod  # For modprobe. To get rid of systemd startup errors. Also strongly recommended for docker.
 # TODO(pts): in-container: sudo apt-get install -y iputils-ping  # For ping. (But busybox can also have it.)
 # TODO(pts): in-container: sudo apt-get install -y docker.io kmod  # For docker.
 # TODO(pts): systemd-nspawn --notify-ready=
+# TODO(pts): doc: if the network interface (or link?) is down, then containers on hostnet cannot communicate either
+# !! TODO(pts): Add command delnet to remove all network interfaces (ip link del dev ...).
+# !! TODO(pts): Copy over LANG, LC_* etc. to container for the `shell' and start-shell commands if it has locale installed.
 # !! TODO(pts): Clean up network linterfaces (ip link) upon container exit in both shell and poweroff. (Can the kernel do it by linking them?)
 # !! TODO(pts): don't follow symlinks up when overwriting files in container rootfs
 # !! TODO(pts): feature: networking mode nat: virtual bridge with NAT
@@ -25,10 +31,11 @@
 # !! TODO(pts): Add other type of networking: same-as-host (bind on the same port won't work), private, separate-ip (currently implemented), to-host, to-host-and-containers, host (-n, may include masquerade; only works if the container is also running systemd (because of DHCP client); no communication with other containers).
 #
 
-if test -z "$RUNN_RERUN" && ! (test $# = 0 || test "$1" = --help); then
+if test -z "$CONCONJ_RERUN" && ! (test $# = 0 || test "$1" = --help); then
   unset S
+  # TODO(pts): Display help as non-root (without sudo).
   test "$(id -u)" != 0 && S='sudo --'
-  exec $S /usr/bin/env -i TZ="$TZ" TERM="$TERM" RUNN_RERUN=1 /bin/sh "$0" "$@"
+  exec $S /usr/bin/env -i TZ="$TZ" TERM="$TERM" CONCONJ_RERUN=1 CONCONJ_UNSAFE_IPTABLES_RESET="$CONCONJ_UNSAFE_IPTABLES_RESET" /bin/sh "$0" "$@"
   exit 1
 fi
 
@@ -49,7 +56,7 @@ if test "$CMD" = start || test "$CMD" = login || test "$CMD" = poweroff || test 
 fi
 if ! test "$CMD"; then
   echo "\
-$0: conconj container manager
+$0: Container Conjurer (conconj)
 Usage: $0 [start] <container-name>
        $0 shell <container-name>  # Root shell.
        $0 show <container-name>
@@ -61,8 +68,9 @@ Usage: $0 [start] <container-name>
 fi
 
 if test "$CMD" = list; then
-  exec machinectl "$CMD" "$@"
-  echo "fatal: command not found: machinectl" >&2
+  type machinectl >/dev/null 2>&1 && exec machinectl "$CMD" "$@"
+  MSG=; test -f /etc/debian_version && MSG=", try: sudo apt-get install systemd-container"
+  echo "fatal: command machinectl not found$MSG" >&2
   exit 2
 fi
 
@@ -83,7 +91,7 @@ if test "$CMD" = start || test "$CMD" = shell; then
   elif test "$CMD" = shell; then
     CMD=start-shell
     if test $# != 0 && test "${1#/}" = "$1"; then
-      # For compatibility with machinectl shell.
+      # For compatibility with `machinectl shell'.
       echo "fatal: shell command must start with /: $1" >&2
       exit 1
     fi
@@ -93,12 +101,18 @@ if test "$CMD" = shell && test $# = 0; then  # machinectl systemd 232 doesn't au
   test -f "$CONAME".container/rootfs/bin/bash && set /bin/bash -l
 fi
 if test "$CMD" != start && test "$CMD" != start-shell; then
-  exec machinectl "$CMD" "$CONAME" "$@"
-  echo "fatal: command not found: machinectl" >&2
-  exit 2
+  type machinectl >/dev/null 2>&1 && exec machinectl "$CMD" "$CONAME" "$@"
+  MSG=; test -f /etc/debian_version && MSG=", try: sudo apt-get install systemd-container"
+  echo "fatal: command machinectl not found$MSG" >&2
 fi
 set x -- "$@"; shift
 
+if ! systemd-nspawn --version >/dev/null 2>&1; then
+  # TODO(pts): On older systems (e.g. Debian 7), it's apt-get install systemd.
+  MSG=; test -f /etc/debian_version && MSG=", try: sudo apt-get install systemd-container"
+  echo "fatal: command systemd-nspawn doesn't work$MSG" >&2
+  exit 2
+fi
 if ! test -f "busybox.conconj" || ! test -x "busybox.conconj"; then
   echo "fatal: executable not found: $CODIR/busybox.conconj"
   exit 2
@@ -113,7 +127,8 @@ if ! test -f "$CONAME.container/rootfs/bin/sh"; then
 fi
 export PERL_BADLANG=x  # Unnecessary, because LC_* is unset.
 if ! perl -e0 2>/dev/null; then
-  echo "fatal: perl doesn't work" >&2
+  MSG=; test -f /etc/debian_version && MSG=", try: sudo apt-get install perl-base"
+  echo "fatal: command perl doesn't work$MSG" >&2
   exit 2
 fi
 CONIP=
@@ -130,10 +145,49 @@ if test "$HOSTNETIP" && ! read HOSTNETIP 2>/dev/null <conconj.hostnet; then
   echo "fatal: missing or empty: $CODIR/conconj.hostnet"
   exit 2
 fi
+LOCALNET4HOSTNETIP=
+test "$HOSTNETIP" && read LOCALNET4HOSTNETIP 2>/dev/null <conconj.localnet
 if test "$LOCALNETIP" && ! read LOCALNETIP 2>/dev/null <conconj.localnet; then
   echo "fatal: missing or empty: $CODIR/conconj.localnet"
   exit 2
 fi
+# With localfwd disabled, localnet containers can connect to each other and
+# to the host (using the localnet gateway IP address of the host), but not
+# anywhere else. With localfwd enabled, containers can also connect to
+# anywhere else (using IP forwarding, IP masquerading and IP connection
+# tracking; connections will be seen from an IP address of the
+# host; connections to hostnet containers will be seen from the
+# localnet container IP address) including hosts on the internet and
+# hostnet containers, and hostnet containers can also connect to localnet
+# containers, but connecting back from internet hosts to localnet containers
+# doesn't work (except possibly with UDP hole punching).
+LOCALFWD=
+test "$LOCALNETIP" && read LOCALFWD 2>/dev/null <conconj.localfwd  # TODO(pts): Ignore trailing whitespace.
+case "$LOCALFWD" in 0 | no | false | disable | disabled) LOCALFWD= ;; *) LOCALFWD=1 ;; esac
+if test "$HOSTNETIP" || test "$LOCALNETIP"; then
+  if ! ip route >/dev/null 2>&1; then
+    MSG=; test -f /etc/debian_version && MSG=", try: sudo apt-get install iproute2"
+    echo "fatal: command ip doesn't work$MSG" >&2
+    exit 2
+  fi
+fi
+if test "$LOCALFWD"; then
+  if ! iptables --version >/dev/null 2>&1; then
+    MSG=; test -f /etc/debian_version && MSG=", try: sudo apt-get install iptables"
+    echo "fatal: command iptables doesn't work$MSG" >&2
+    exit 2
+  fi
+  if test -z "$CONCONJ_UNSAFE_IPTABLES_RESET"; then
+    for A in iptables-save iptables-restore; do
+      if ! type "$A" >/dev/null 2>&1; then
+        MSG=; test -f /etc/debian_version && MSG=", try: sudo apt-get install iptables"
+        echo "fatal: command $A doesn't work$MSG" >&2
+        exit 2
+      fi
+    done
+  fi
+fi
+
 
 # ---
 
@@ -167,16 +221,23 @@ if test "$NETDEVIP"; then
   test "$NETMASKBITS" || exit 2
   test "$NETMASK" || exit 2
 fi
-HOSTNETDEV="$NETDEV"
+HOSTNETDEV="$NETDEV"; HOSTNETMAC=
 if test "$LOCALNETIP"; then
   perl -e 'die "fatal: bad localnetip: $ARGV[0]" if $ARGV[0] !~ m@\A(\d+)[.](\d+)[.](\d+)[.](\d+)(?:/32)?\Z(?!\n)@' -- "$LOCALNETIP" || exit 2
-  NETDEV=; NETMASKBITS=24; NETMASK=255.255.255.0; NETGATEWAY=;
-  NETNETIP="${LOCALNETIP%.*}.0"; NETBRIP="${LOCALNETIP%.*}.1"; CONIP="${LOCALNETIP%.*}.${CONIP##*.}"
-  NETBRIP=
-  if test "$NETNETIP" = "$NETBRIP" || test "$NETNETIP" = "$LOCALNETIP" || test "$NETNETIP" = "$CONIP" || test "$NETBRIP" = "$LOCALNETIP" || test "$NETBRIP" = "$CONIP" || test "$LOCALNETIP" = "$CONIP"; then
-    echo "fatal: IP addresses must be different: net=$NETNETIP bridge=$NETBRIP host=$LOCALNETIP container=$CONIP" >&2
+  NETDEV=; NETMASKBITS=24; NETMASK=255.255.255.0
+  NETNETIP="${LOCALNETIP%.*}.0"; CONIP="${LOCALNETIP%.*}.${CONIP##*.}"
+  NETGATEWAY=; test "$LOCALFWD" && NETGATEWAY="$LOCALNETIP"
+  if test "$NETNETIP" = "$LOCALNETIP" || test "$NETNETIP" = "$CONIP" || test "$LOCALNETIP" = "$CONIP"; then
+    echo "fatal: IP addresses must be different: net=$NETNETIP host=$LOCALNETIP container=$CONIP" >&2
     exit 2
   fi
+  if test "$LOCALFWD"; then
+    HOSTNETMAC="$(ip -o link show dev "$HOSTNETDEV" | perl -wne 'if (m@ link(?:/\S+)? +((?:[0-9a-f]{2}:){5}[0-9a-f]{2})\s@) { print "$1\n"; last }')";
+  fi
+fi
+if test "$LOCALNET4HOSTNETIP"; then
+  perl -e 'die "fatal: bad localnetip: $ARGV[0]" if $ARGV[0] !~ m@\A(\d+)[.](\d+)[.](\d+)[.](\d+)(?:/32)?\Z(?!\n)@' -- "$LOCALNET4HOSTNETIP" || exit 2
+  LOCALNETNET4HOSTNETIP="${LOCALNET4HOSTNETIP%.*}.0"; LOCALNETMASK4HOSTNET=255.255.255.0
 fi
 
 BM=
@@ -190,7 +251,7 @@ if test -e "$CONAME".container/rootfs/sbin/modprobe; then
   fi
 fi
 
-if test "$CONIP" = private; then
+if test "$CONIP" = private || (test "$LOCALNETIP" && test -z "$LOCALFWD"); then
   LINE=""  # No DNS servers in the container please.
 else
   ISSR=
@@ -396,7 +457,7 @@ else
   if test "$HOSTNETIP"; then
     (ip -o addr show cc-hostnet 2>/dev/null | while read A B C D E; do
       if test "$B" = cc-hostnet && test "$C" = inet && test "$D" != "$HOSTNETIP/32"; then
-        echo "fatal: device cc-hostnet already up, with IP address ${D%/*}, should be: $HOSTNETIP" >&2
+        echo "fatal: device cc-hostnet already up, with IP address ${D%/*}, should be: $HOSTNETIP; fix it with: sudo ip link del dev cc-hostnet" >&2
         exit 2
       fi
     done) || exit 2
@@ -421,6 +482,7 @@ else
       fi
       ip addr add "$HOSTNETIP"/32 brd + dev cc-hostnet || exit 2
       ip link set cc-hostnet up || exit 2  # `ip route add' below needs it.
+      ip addr flush dev cc-hostnet scope link || exit 2  # Remove link-local IPv6 (inet6) address.
     fi
     ip link del "$CONNETIF" 2>/dev/null ||:
     # ip -n "$CONNETNS" link del "$CONNETIF" 2>/dev/null ||:
@@ -440,27 +502,18 @@ else
       fi
     fi
     test "$(ip route show "$CONIP"/32)" && ip route del "$CONIP"/32
-    # This route "$HOSTNETIP"/32 isn't added by default, but we don't need it.
+    # The route "$HOSTNETIP"/32 isn't added by default, but we don't need it.
+    # It would be awesome to remove this route automatically when the container
+    # stops, but there is no mechanism for that: it will linger around.
     ip route add "$CONIP"/32 dev cc-hostnet || exit 2
   elif test "$LOCALNETIP"; then
+    # veth + bridge + iptables setup based on: https://superuser.com/a/765078
     # Using busybox to avoid the need for `apt-get install bridge-utils'.
     LINE="$(ip link add cb-localnet type bridge 2>&1)"
     case "$?:$LINE" in
      0: | *:\ File\ exists) ;;
      *) echo "$LINE" >&2; echo "fatal: error creating bridge" >&2; exit 2
     esac
-    if test "$NETBRIP"; then  # !!! NETBRIP is always empty, remove
-      LINE=$(ip -o addr show cb-localnet 2>&1 | while read A B C D E; do
-            if test "$C" = inet && test "$D" = "$NETBRIP"/"$NETMASKBITS"; then echo 1
-            else echo 2
-            fi
-          done)
-      if test "$LINE" != 1; then
-        ip addr flush cb-localnet || exit 2
-        # It works (even with forwarding) without a bridge having an IP address.
-        ip addr add "$NETBRIP"/"$NETMASKBITS" dev cb-localnet noprefixroute || exit 2
-      fi
-    fi
     ip link set cb-localnet up || exit 2  # Doesn't add the route because of noprefixroute above.
     if ! ip link show cg-localnet >/dev/null 2>&1 ||
        ! ip link show cc-localnet >/dev/null 2>&1; then
@@ -478,12 +531,18 @@ else
           else echo 2
           fi
         done)
-    if test "$LINE" != 1; then
-      ip addr flush cc-localnet || exit 2
+    if test "$LINE" = 1; then
+      :
+    elif test "$LINE"; then
+      echo "fatal: device cc-localnet already up, should be: $LOCALNETIP/$NETMASKBITS; fix it with: sudo ip addr flush dev cc-localnet" >&2
+      exit 2
+    else
       ip addr add "$LOCALNETIP"/"$NETMASKBITS" brd + dev cc-localnet || exit 2
     fi
-    ip link set cg-localnet up
-    ip link set cc-localnet up  # Also adds the route.
+    ip link set cg-localnet up || exit 2
+    ip link set cc-localnet up || exit 2  # Also adds the route. Also adds a link-local IPv6 (inet6) address for cg-localnet (!).
+    ip addr flush dev cg-localnet scope link || exit 2  # Remove link-local IPv6 (inet6) address.
+    ip addr flush dev cc-localnet scope link || exit 2  # Remove link-local IPv6 (inet6) address.
     # `ip route del' deletes only one route, so we run it in a loop.
     # Adding the route is not needed, `ip link set cc-localnet up' has done it.
     #    while test "$(ip route show "$NETNETIP"/"$NETMASKBITS")"; do ip route del "$NETNETIP"/"$NETMASKBITS"; done
@@ -497,13 +556,93 @@ else
       exit 2
     fi
     ip link set cg."$CONAME" up
-    #ip link set "$CONNETIF" up
-
     #set x --network-interface=cg."$CONAME" "$@"; shift  # Breaks `ping' (even adter ifconfig cg."$CONAME" up), don't do it.
-    # !! add NAT
-    # !! add DNS only if NAT
-    # No need for IP forwarding (echo 1 > /proc/sys/net/ipv4/ip_forward)
-    # for the bridge to work.
+    #ip link set "$CONNETIF" up  # Will be done by busybox in the container.
+
+    if test "$LOCALFWD"; then
+      test ! -f /proc/sys/net/ipv4/ip_forward || echo 1 >/proc/sys/net/ipv4/ip_forward || echo 2
+      test ! -f /proc/sys/net/bridge/bridge-nf-call-arptables || echo 0 >/proc/sys/net/bridge/bridge-nf-call-arptables || exit 2
+      # Without this, bridged packets don't make it to the POSTROUTING chain.
+      # There is also bridge-nf-call-ip6tables, but we don't need it.
+      test ! -f /proc/sys/net/bridge/bridge-nf-call-iptables || echo 0 >/proc/sys/net/bridge/bridge-nf-call-iptables || exit 2
+      # Now we add netfilter rules (with iptables) to the beginning of the
+      # `-A FORWARD' and `-t nat -A POSTROUTING' chains. We don't care about
+      # the policy (-P) on these chains.
+      #
+      # TODO(pts): Cooperate with ufw: use `-I ufw-user-forward' instead of
+      #     `-I FORWARD'. But there is not equivalent for POSTROUTING. At least
+      #     run the iptables commands after ufw has started.
+      if test "$CONCONJ_UNSAFE_IPTABLES_RESET"; then  # Specify this in the command-line.
+        # This implementation removes all previous rules from the chains it
+        # edits (do it's destructive and probably unsafe), but it doesn't
+        # change the policy (-P). See the non-destructive (but uncommented)
+        # version below.
+        iptables -F FORWARD || exit 2
+        # Make connections from a hostnet container to a localnet container
+        # work. Unfortunately this rule never matches, because the packet has
+        # IN=wlp2s0 rather than IN=cc-hostnet. See the next rule for a
+        # workaround.
+        iptables -A FORWARD -i cc-hostnet -o cc-localnet -d "$NETNETIP"/"$NETMASKBITS" -j ACCEPT || exit 2
+        # Make connections from a hostnet container to a localnet container
+        # actually work. This is a workaround for the previous rule, it
+        # specifies `-m mac --mac-source "$HOSTNETMAC"' instead of `-i
+        # hostnet'. It matches only if ipvlan is used (which is the default,
+        # except that old systems such as Debian 8 have only macvlan.)
+        test "$HOSTNETMAC" && iptables -A FORWARD -o cc-localnet -d "$NETNETIP"/"$NETMASKBITS" -m mac --mac-source "$HOSTNETMAC" -j ACCEPT || exit 2
+        # About including INVALID: http://www.smythies.com/~doug/network/iptables_notes/
+        iptables -A FORWARD -i cc-localnet -p tcp -m state --state INVALID -j DROP || exit 2
+        iptables -A FORWARD -o cc-localnet -d "$NETNETIP"/"$NETMASKBITS" ! -s "$NETNETIP"/"$NETMASKBITS" -m state --state ESTABLISHED,RELATED -j ACCEPT || exit 2
+        iptables -A FORWARD -i cc-localnet -s "$NETNETIP"/"$NETMASKBITS" ! -d "$NETNETIP"/"$NETMASKBITS" -j ACCEPT || exit 2
+        iptables -t nat -F POSTROUTING || exit 2  # No need to change the default policy to -P ACCEPT
+        # Make connections from a localnet container to a hostnet container
+        # use the original localnet IP address, without NAT (MASQUERADE).
+        iptables -t nat -A POSTROUTING -s "$NETNETIP"/"$NETMASKBITS" ! -d "$NETNETIP"/"$NETMASKBITS" -o cc-hostnet -j ACCEPT || exit 2
+        # We don't specify -o "$HOSTNETDEV" here, because it's not restrictive
+        # enough, OUTPUT packets also go there.
+        iptables -t nat -A POSTROUTING -s "$NETNETIP"/"$NETMASKBITS" ! -d "$NETNETIP"/"$NETMASKBITS" -j MASQUERADE || exit 2
+      else
+        # Prepend our rules to `-A FORWARD' and `-t nat -A POSTROUTING' chains.
+        # This backtracks counters a bit, rewrites chain rules from scratch,
+        # but it doesn't change the chain policy (-P).
+        # TODO(pts): Be idempotent: don't change it if not needed. (This
+        #     depends on some serialization rules (e.g. uppercase $hostnetmac).
+        LINE="$(iptables-save | NIM="$NETNETIP/$NETMASKBITS" HOSTNETMAC="$HOSTNETMAC" perl -we '
+            use integer; use strict;
+            my %tables; my $nim = $ENV{NIM}; my $hostnetmac = uc($ENV{HOSTNETMAC});
+            my $hostnetmac_rule = ""; $hostnetmac_rule = "-A FORWARD -d $nim -o cc-localnet -m mac --mac-source $hostnetmac -j ACCEPT" if length($hostnetmac);
+            $tables{filter} = qq(
+                -A FORWARD -d $nim -i cc-hostnet -o cc-localnet -j ACCEPT
+                $hostnetmac_rule
+                -A FORWARD -i cc-localnet -p tcp -m state --state INVALID -j DROP
+                -A FORWARD ! -s $nim -d $nim -o cc-localnet -m state --state RELATED,ESTABLISHED -j ACCEPT
+                -A FORWARD -s $nim ! -d $nim -i cc-localnet -j ACCEPT
+            );
+            $tables{nat} = qq(
+                -A POSTROUTING -s $nim ! -d $nim -o cc-hostnet -j ACCEPT
+                -A POSTROUTING -s $nim ! -d $nim -j MASQUERADE
+            );
+            { for my $table (sort(keys(%tables))) { $tables{$table} =~ s@\n[ \t]+@\n@g; $tables{$table} =~ s@\A\n+@@; $tables{$table} =~ s@\n{2,}@\n@g; 1 while chomp($tables{$table}); $tables{$table} .= "\n" if length($tables{$table}) } }
+            { my $table = ""; my $do_print = 0;
+              while (<STDIN>) {
+                next if m@^#@;
+                if (m@^[*](.*)$@) { $table = $1; $do_print = exists($tables{$table}); next if !$do_print; print; print $tables{$table}; delete $tables{$table}; next }
+                next if !$do_print;
+                if ($table eq "filter") { next if m@^-A FORWARD(?= ).* -[io] cc-localnet @ }  # Remove old conconj localnet rule.
+                if ($table eq "nat") { next if m@^-A POSTROUTING -s \Q$nim ! -d $nim @ }  # Remove old conconj localnet rule.
+                print;
+            } }
+            { for my $table (sort(keys(%tables))) { print "*$table\n$tables{$table}COMMIT\n" } }
+            ')"
+        if test $? != 0 || test -z "$LINE"; then
+          echo "fatal: error in iptables-save + rule editing" >&2
+          exit 2
+        fi
+        if ! (echo "$LINE" | iptables-restore); then
+          echo "fatal: error in iptables-restore" >&2
+          exit 2
+        fi
+      fi
+    fi
   fi
   if test -z "$NETMASK"; then
     echo "assert: \$NETMASK not set" >&2
@@ -514,6 +653,11 @@ else
   # after `sudo apt-get install -y ifupdown'.
   test -d "$CONAME".container/rootfs/etc/network || mkdir "$CONAME".container/rootfs/etc/network || exit 2
   NETGATEWAYH=; test "$NETGATEWAY" || NETGATEWAYH="#"
+  NETGATEWAYLH="#"; test "$NETGATEWAY" && test "$LOCALFWD" && NETGATEWAYLH=
+  LOCALNETROUTE=
+  test "$LOCALNET4HOSTNETIP" && LOCALNETROUTE="/etc/busybox.conconj route add -net '$LOCALNETNET4HOSTNETIP' netmask '$LOCALNETMASK4HOSTNET' gateway '$HOSTNETIP' || exit \$?"
+  LOCALNETROUTEUP='#up conconj-localnet-route'
+  test "$LOCALNET4HOSTNETIP" && LOCALNETROUTEUP="up /etc/busybox.conconj route add -net '$LOCALNETNET4HOSTNETIP' netmask '$LOCALNETMASK4HOSTNET' gateway '$HOSTNETIP'"
   echo "#conconj
 auto lo
 iface lo inet loopback
@@ -523,12 +667,19 @@ iface $CONNETIF inet static
   address $CONIP
   netmask $NETMASK
   ${NETGATEWAYH}gateway $NETGATEWAY
+  $LOCALNETROUTEUP
 " >"$CONAME".container/rootfs/etc/network/interfaces || exit 2;
   # Broadcast is enabled by default, no need for `broadcast +'.
+  # The `ping -c1' below is a workaround for slow ping startup after restarting
+  # a localnet container. Without it, it took 9..17..24 seconds for a
+  # hostnet-to-localnet ping to work.
   echo "
 /etc/busybox.conconj ifconfig '$CONNETIF' '$CONIP' netmask '$NETMASK' up || exit \$?
 ${NETGATEWAYH}/etc/busybox.conconj route add default gw '$NETGATEWAY' || exit \$?
+${NETGATEWAYLH}/etc/busybox.conconj ping -c1 '$NETGATEWAY' >/dev/null 2>&1 || exit \$?
+$LOCALNETROUTE
 " >"$CONAME".container/rootfs/etc/netup.container || exit 2
+  #cat "$CONAME".container/rootfs/etc/netup.container
   set x --network-interface="$CONNETIF" "$@"; shift
   # Undo incorrect setup_resolv_conf() magic in systemd-nspawn, which may
   # bind-mount or overwrite /etc/resolv.conf .  !! undo if not needed (--private-network and --network-interface= don't need it).
