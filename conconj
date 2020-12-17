@@ -44,7 +44,7 @@ if test -z "$CONCONJ_RERUN" && ! (test $# = 0 || test "$1" = --help); then
 fi
 
 CMD=
-if test "$1" = start || test "$1" = shell || test "$1" = start-shell || test "$1" = login || test "$1" = poweroff ||  test "$1" = stop || test "$1" = kill || test "$1" = show; then
+if test "$1" = start || test "$1" = shell || test "$1" = start-shell || test "$1" = login || test "$1" = poweroff ||  test "$1" = stop || test "$1" = kill || test "$1" = pts-debootstrap || test "$1" = show; then
   if test $# != 1; then
     CMD="$1"; CONAME="$2"; shift; shift
   fi
@@ -69,6 +69,7 @@ Usage: $0 [start] <container-name>
        $0 kill <container-name> -s 9  # Force kill (SIGKILL) all processes.
        $0 login <container-name>
        $0 list  # List active containers.
+       $0 pts-debootstrap <container-name> [<arg> ...] <debian-dist>  # Create new container rootfs with Debian, Ubuntu etc.
        $0 delnet  # Delete network interfaces and rules." >&2
   exit 1
 fi
@@ -122,6 +123,40 @@ fi
 case "$CONAME" in
  -* | *[!-._a-zA-Z0-9]* | "") echo "fatal: bad container name: $CONAME"; exit 1 ;;
 esac
+
+if test "$CMD" = pts-debootstrap; then
+  if type wget >/dev/null 2>&1; then
+    DOWNLOAD="wget --no-check-certificate -qO-"
+  elif type curl >/dev/null 2>&1; then
+    DOWNLOAD="curl -fskL"
+  else
+    echo "fatal: downloader wget or curl not found" >&2
+    exit 3
+  fi
+  for F in pts-debootstrap; do
+    if ! test -f "$F"; then
+      BASE_URL=https://raw.githubusercontent.com/pts/pts-debootstrap/master
+      $DOWNLOAD "$BASE_URL"/"$F" >"$F".tmp
+      if test $? != 0 || ! test -s "$F".tmp; then
+        echo "fatal: download failed: $BASE_URL/"$F"" >&2
+        exit 3
+      fi
+      mv "$F".tmp "$F" || exit 3
+      chmod +x "$F" || exit 3
+    fi
+    test -x "$F" || chmod +x "$F" || exit 3
+  done
+
+  test -d "$CONAME".container || mkdir "$CONAME".container || exit 2
+  if test -d "$CONAME".container/rootfs; then
+    echo "fatal: container rootfs directory already exists, not clobbering: $CONAME.container/rootfs" >&2
+    exit 2
+  fi
+  # `shared' is the easiest to set up, doesn't need IP addresses or iptables(8).
+  test -f "$CONAME".container/ipaddr || echo shared >"$CONAME".container/ipaddr || exit 2
+  echo "info: downloading and installing distro to: $CONAME.container/rootfs" >&2
+  exec ./pts-debootstrap --include=dbus --arch amd64 "$@" "$CONAME".container/rootfs; exit 2
+fi
 
 if test "$CMD" = start || test "$CMD" = shell || test "$CMD" = start-shell; then
   if machinectl show "$CONAME" 2>/dev/null >&2; then  # Early exit.
