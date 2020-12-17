@@ -20,6 +20,7 @@
 #            SUXX: doesn't transfer $TERM, doesn't transfer stty -a: rows 24; columns 80
 # TODO(pts): doc: document networking
 # TODO(pts): `machinectl terminate ...' instead of `machinectl kill ... -s 9'
+# !! TODO(pts): Ubuntu 16.04 guest: hostname is not set to $CONAME; shell doesn't work: ``Failed to get shell PTY: Protocol error''
 # !! TODO(pts): umount /tmp if configured -- or add /etc/rc.local to container /etc/profile + systemd?
 # !! TODO(pts): upon poweroff, detect busybox, and automatically send SIGUSR2
 # !! TODO(pts): Copy over LANG, LC_* etc. to container for the `shell' and start-shell commands if it has locale installed.
@@ -355,13 +356,15 @@ RCL="$(readlink "$CONAME".container/rootfs/etc/resolv.conf)"
 if test "$RCL"; then
   A=; case "$RCL" in ../*) A="${RCL#*/}" ;; esac
   test "$A" && case "$A/" in */../*) A="" ;; esac  # Safety.
-  case "$A" in run/systemd/resolve/*) test -d "$CONAME".container/rootfs/run/systemd/resolve || mkdir -p "$CONAME".container/rootfs/run/systemd/resolve || exit 2; RCL= ;; esac
+  case "$A" in
+   run/systemd/resolve/*) test -d "$CONAME".container/rootfs/run/systemd/resolve || mkdir -p "$CONAME".container/rootfs/run/systemd/resolve || exit 2; RCL= ;;
+   run/resolvconf/*) test -d "$CONAME".container/rootfs/run/resolvconf || mkdir -p "$CONAME".container/rootfs/run/resolvconf || exit 2; RCL= ;;
+  esac
 fi
-
 
 if ! test "$RCL"; then  # Container /etc/resolv.conf is not a symlink or it is a systemd symlink.
   : >>"$CONAME".container/rootfs/etc/resolv.conf.container  # Create it if needed.
-  # Copy over host resolve config to container /etc/resolv.conf.
+  # Copy over host resolve config to container /etc/resolv.conf.container.
   echo "$LINE" | perl -ni -0777 -we '
       use integer; use strict; our %conf; our %confhad;
       BEGIN {
@@ -382,9 +385,9 @@ if ! test "$RCL"; then  # Container /etc/resolv.conf is not a symlink or it is a
       }
       if (exists($conf{DNS}) and !exists($confhad{DNS})) { for my $dns (split(/ /, $conf{DNS})) { print "nameserver $dns\n" } }
   ' "$CONAME".container/rootfs/etc/resolv.conf.container || exit 2
+  # Container /etc/resolv.conf may get overwritten by systemd-nspawn at container startup.
+  cat <"$CONAME".container/rootfs/etc/resolv.conf.container >"$CONAME".container/rootfs/etc/resolv.conf || exit 2
 fi
-# Container /etc/resolv.conf may get overwritten by systemd-nspawn at container startup.
-cat <"$CONAME".container/rootfs/etc/resolv.conf.container >"$CONAME".container/rootfs/etc/resolv.conf || exit 2
 
 # TODO(pts): Security: don't follow symlinks.
 #
@@ -749,7 +752,9 @@ $LOCALNETROUTE
   set x --network-interface="$CONNETIF" "$@"; shift
   # Undo incorrect setup_resolv_conf() magic in systemd-nspawn, which may
   # bind-mount or overwrite /etc/resolv.conf .  !! undo if not needed (--private-network and --network-interface= don't need it).
-  : >>"$CONAME".container/rootfs/etc/resolv.conf.container.start || exit 2  # Create.
+  if test -f "$CONAME.container/rootfs/etc/resolv.conf.container"; then
+    : >>"$CONAME".container/rootfs/etc/resolv.conf.container.start || exit 2  # Create.
+  fi
 fi
 
 #set x --setenv=HOST="$HOST" "$@"; shift  # This doesn't affect command start.
