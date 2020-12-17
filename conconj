@@ -20,7 +20,6 @@
 #            SUXX: doesn't transfer $TERM, doesn't transfer stty -a: rows 24; columns 80
 # TODO(pts): doc: document networking
 # TODO(pts): `machinectl terminate ...' instead of `machinectl kill ... -s 9'
-# !! TODO(pts): Ubuntu 16.04 guest: hostname is not set to $CONAME; shell doesn't work: ``Failed to get shell PTY: Protocol error''
 # !! TODO(pts): umount /tmp if configured -- or add /etc/rc.local to container /etc/profile + systemd?
 # !! TODO(pts): upon poweroff, detect busybox, and automatically send SIGUSR2
 # !! TODO(pts): Copy over LANG, LC_* etc. to container for the `shell' and start-shell commands if it has locale installed.
@@ -158,15 +157,25 @@ if test "$CMD" != start && test "$CMD" != start-shell; then
     case "$(readlink "$CONAME".container/rootfs/sbin/init)" in
      *systemd*) ;;  # Typically /lib/systemd/systemd .
      *busybox*) CMD=kill; set x -s USR2 --kill-who=leader; shift ;;
-     *) if test -f "$CONAME".container/rootfs/sbin/initctl; then
+     *) if test -f "$CONAME".container/rootfs/sbin/initctl ||
+           (test -f "$CONAME".container/rootfs/etc/inittab &&
+            perl -e 'while (<STDIN>) { exit(0) if m@^pf::powerwait:/sbin/shutdown\s@ } exit(1)' <"$CONAME".container/rootfs/etc/inittab  # Debian 7 sysvinit /etc/inittab modified by conconj.
+           ); then
           # We could also detect /sbin/upstart-file-bridge .
           CMD=kill; set x -s PWR --kill-who=leader; shift
-          # On Ubuntu 14.04, the `Killing all remaining processes...' phase is slow.
-          echo "warning: upstart may need 10 seconds to stop" >&2
+          if test -f "$CONAME".container/rootfs/sbin/initctl; then
+            # On Ubuntu 14.04, the `Killing all remaining processes...' phase is slow.
+            echo "warning: upstart may need 10 seconds to stop" >&2
+          else
+            # On Debian 7, it takes 3 seconds to do ``Will now halt.''
+            echo "warning: sysvinit may need 3 seconds to stop" >&2
+          fi
         else
           echo "fatal: init system not detected, no way to stop; try: $0 kill $CONAME -s 9" >&2; exit 2
         fi
-        ;;  # FYI `machinectl shell "$CONAME" /sbin/shutdown -P' works in sysvinit and upstart (Ubuntu 14.04) as well, but `machinectl shell' and `systemd-run -M' need systemd in the container.
+        # FYI `-s INT' to init typically does a reboot, but that fails due to a bug with network namespaces: ``Failed to resolve interface cc.deb7: No such device''.
+        # FYI `machinectl shell "$CONAME" /sbin/shutdown -hP now' may work in sysvinit and upstart (Ubuntu 14.04) as well, but `machinectl shell' and `systemd-run -M' need systemd in the container.
+        ;;
     esac
   fi
   type machinectl >/dev/null 2>&1; A=$?
@@ -917,9 +926,14 @@ if test "$CMD" = start-shell; then
 fi
 
 if test -f "$CONAME".container/rootfs/etc/inittab; then
-  if ! perl -ne 'exit(1) if m@^tty\d+:.*getty.*[ t]tty(\d+)$@' <"$CONAME".container/rootfs/etc/inittab; then
+  if ! perl -ne 'exit(1) if m@^(?:tty)?\d+:.*getty.*[ t]tty(\d+)$@ or
+      (m@^pf::powerwait:@ and m@\n@ and !m@^pf::powerwait:/sbin/shutdown\s@);
+      ' <"$CONAME".container/rootfs/etc/inittab; then
     # Prevent busybox init from listening on /dev/tty$N, generating errors.
-    perl -pi -e 's@^@#@ if m@^tty\d+:.*getty.*[ t]tty(\d+)$@' "$CONAME".container/rootfs/etc/inittab || exit 2
+    # Change Debian 7 `pf::powerwait:/etc/init.d/powerfail start' to shutdown -q.
+    perl -pi -e 's@^@#@ if m@^(?:tty)?\d+:.*getty.*[ t]tty(\d+)$@;
+        s@^pf::powerwait:.*\n@pf::powerwait:/sbin/shutdown -hP now\n@;
+        ' "$CONAME".container/rootfs/etc/inittab || exit 2
   fi
 fi
 
