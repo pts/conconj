@@ -200,7 +200,14 @@ if test "$CMD" != start && test "$CMD" != start-shell; then
         echo "fatal: systemd needed by shell is not installed or not running in container" >&2; exit 2 ;;
        "No such method "*)
         echo "fatal: systemd needed by shell in container is too old, shell won't work while it is running; stop it first" >&2; exit 2 ;;
-       "Invalid arguments "*"ssa("* | *"busctl: "*"not found" | *"not found: busctl")
+       *"busctl: "*"not found" | *"not found: busctl")
+        echo "fatal: error starting shell (see error message above), diagnostics tool busctl not available" >&2; ;;  # Do not exit.
+       "Invalid arguments "*"ssa("*)
+        B="$(machinectl "$CMD" "$CONAME" / 2>&1)"
+        case "$B" in
+         *" PTY: Cannot set property "*", or unknown property"*)  # Property is: StandardInputFileDescriptor.
+          echo "fatal: systemd needed by shell in container is too old, shell won't work while it is running; stop it first, or try login instead of shell" >&2; exit 2 ;;
+        esac
         echo "fatal: see error message above" >&2 ;;  # Do not exit.
        *)
         echo "error: $B" >&2
