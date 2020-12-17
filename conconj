@@ -44,7 +44,7 @@ if test -z "$CONCONJ_RERUN" && ! (test $# = 0 || test "$1" = --help); then
 fi
 
 CMD=
-if test "$1" = start || test "$1" = shell || test "$1" = login || test "$1" = poweroff ||  test "$1" = stop || test "$1" = kill || test "$1" = show; then
+if test "$1" = start || test "$1" = shell || test "$1" = start-shell || test "$1" = login || test "$1" = poweroff ||  test "$1" = stop || test "$1" = kill || test "$1" = show; then
   if test $# != 1; then
     CMD="$1"; CONAME="$2"; shift; shift
   fi
@@ -62,6 +62,7 @@ if ! test "$CMD"; then
 $0: Container Conjurer (conconj)
 Usage: $0 [start] <container-name>
        $0 shell <container-name>  # Root shell.
+       $0 start-shell <container-name>  # Start, run root shell as PID 1.
        $0 show <container-name>
        $0 stop <container-name>  # Gracefully, but don't wait for shutdown.
        $0 kill <container-name> [<arg> ...]
@@ -122,15 +123,15 @@ case "$CONAME" in
  -* | *[!-._a-zA-Z0-9]* | "") echo "fatal: bad container name: $CONAME"; exit 1 ;;
 esac
 
-if test "$CMD" = start || test "$CMD" = shell; then
+if test "$CMD" = start || test "$CMD" = shell || test "$CMD" = start-shell; then
   if machinectl show "$CONAME" 2>/dev/null >&2; then  # Early exit.
-    if test "$CMD" = start; then
+    if test "$CMD" != shell; then
       echo "info: shutdown gracefully: $0 stop $CONAME" >&2
       echo "info: force kill: $0 kill $CONAME -s 9" >&2
       echo "fatal: container already running: $CONAME" >&2
       exit 2
     fi
-  elif test "$CMD" = shell; then
+  elif test "$CMD" != start; then
     CMD=start-shell
     if test $# != 0 && test "${1#/}" = "$1"; then
       # For compatibility with `machinectl shell'.
