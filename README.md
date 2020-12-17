@@ -16,6 +16,19 @@ Advantages over systemd-nspawn:
 
 ## Tutorial
 
+Download conconj (run without leading `$`s):
+
+```
+$ cd ~/Downloads
+$ wget -nv -O conconj-master.zip https://github.com/pts/conconj/archive/master.zip
+...
+$ unzip -o conconj-master.zip
+...
+$ cd conconj-master
+$ ./conconj
+...
+```
+
 Download and install stretch (Debian 9) to a container filesystem (rootfs) (it takes a few minutes):
 
 ```
