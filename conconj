@@ -566,6 +566,9 @@ if test "$CONIP" = shared; then
   test -d "$CONAME".container/rootfs/etc/network || mkdir "$CONAME".container/rootfs/etc/network || exit 2
   echo "#conconj shared" >"$CONAME".container/rootfs/etc/network/interfaces || exit 2;
   echo "#conconj shared" >"$CONAME".container/rootfs/etc/netup.container || exit 2
+  if test -f "$CONAME.container/rootfs/etc/resolv.conf.container"; then
+    : >>"$CONAME".container/rootfs/etc/resolv.conf.container.start || exit 2  # Create.
+  fi
   # TODO(pts): Disable systemd-resolved in the container, so that it doesn't
   # try to bind on UDP 127.0.0.53:53 (which is probably already used by the
   # host).
