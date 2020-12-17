@@ -20,14 +20,14 @@ Host requirements:
 
 Operating system compatibility on host:
 
-* Ubuntu 14.04: It doesn't work, because the OS doesn't have systemd-nspawn. The OS has systemd-204, but only parts are installed, the OS doesn't have systemd-sysv.
+* Ubuntu 14.04: It doesn't work. It has package for systemd 204 containing systemd-nspawn, but not machinectl or systemd-run. By default Ubuntu 14.04 uses upstart (rather than systemd or sysvinit), only parts of systemd are installed.
 * Ubuntu 16.04: It works with patch_nspawn.pl for systemd 229.
 * Ubuntu 18.04: It works. It has systemd 237.
 * Ubuntu 20.04: It works. It has systemd 245.4.
 * Debian 7: It doesn't work, because the OS has systemd 44 available, which is too old, and systemd-nspawn doesn't have some important flags (e.g. --bind). By default, systemd isn't even installed, and installing it to Debian 7 is dangerous.
-* Debian 8: It works, with patch_nspawn.pl for systemd 215, Limitations: network doesn't work over wifi (silently drops everything, even packets within host and container, this is because there is no ipvlan support), no shell when the container is already running (use login instead after `... shell ... /usr/bin/passwd root').
+* Debian 8: It works, with patch_nspawn.pl for systemd 215, Limitations: network doesn't work over wifi (silently drops everything, even packets within host and container, this is because there is no ipvlan support), no shell when the container is already running (use login instead after `... shell ... /usr/bin/passwd root', shell appeared in systemd 224).
 * Debian 9: It works, with patch_nspawn.pl for systemd 232.
-* Debian 10: It works.
+* Debian 10: It works. It has systemd 241.
 
 ## Networking
 
