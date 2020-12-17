@@ -145,12 +145,12 @@ case "$CMD:$#" in
  shell:0 | start-shell:0)
   if test -f "$CONAME".container/rootfs/bin/bash; then
     # machinectl systemd 232 doesn't autodetect /bin/bash.
-    set /bin/bash -l
+    set /bin/sh -c 'cd; exec /bin/bash -l'
   else  # dash and busybox sh don't use /dev/console by default.
     # Error messages without this fix:
     # -sh: can't access tty; job control turned off
     # -sh: can't open /dev/tty: No such device or address
-    test "$CMD" = start-shell && set /bin/sh -c 'exec <>/dev/console >&0 2>&0; exec /bin/sh -l'
+    test "$CMD" = start-shell && set /bin/sh -c 'exec <>/dev/console >&0 2>&0; cd; exec /bin/sh -l'
   fi ;;
 esac
 if test "$CMD" != start && test "$CMD" != start-shell; then
