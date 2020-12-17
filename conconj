@@ -169,7 +169,38 @@ if test "$CMD" != start && test "$CMD" != start-shell; then
         ;;  # FYI `machinectl shell "$CONAME" /sbin/shutdown -P' works in sysvinit and upstart (Ubuntu 14.04) as well, but `machinectl shell' and `systemd-run -M' need systemd in the container.
     esac
   fi
-  type machinectl >/dev/null 2>&1 && exec machinectl "$CMD" "$CONAME" "$@"
+  type machinectl >/dev/null 2>&1; A=$?
+  if test "$CMD" = shell && test "$A" = 0; then
+    machinectl "$CMD" "$CONAME" "$@"; A=$?
+    if test "$A" != 0; then
+      # Do some diagnostics.
+      B="$(busctl --machine "$CONAME" call org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager StartTransientUnit 2>&1)"
+      case "$B" in
+       "Failed to connect to bus: Host is down")
+        echo "fatal: container has not been started" >&2; exit 2 ;;
+       "Failed to connect to bus: Protocol error")
+        if test -f "$CONAME".container/rootfs/bin/dbus-daemon ||
+           test -f "$CONAME".container/rootfs/usr/bin/dbus-daemon; then
+          echo "fatal: dbus-daemon needed by shell is installed but not running in container" >&2
+        else
+          MSG=; test -f "$CONAME".container/rootfs/etc/debian_version && MSG="; stop it, and then run this in the container: sudo apt-get update; sudo apt-get install dbus"
+          echo "fatal: dbus-daemon needed by shell is not installed in container$MSG" >&2
+        fi
+        exit 2 ;;
+       "The name "*" was not provided"* | "No such interface "*)
+        echo "fatal: systemd needed by shell is not installed or not running in container" >&2; exit 2 ;;
+       "No such method "*)
+        echo "fatal: systemd needed by shell in container is too old, shell won't work while it is running; stop it first" >&2; exit 2 ;;
+       "Invalid arguments "*"ssa("* | *"busctl: "*"not found" | *"not found: busctl")
+        echo "fatal: see error message above" >&2 ;;  # Do not exit.
+       *)
+        echo "error: $B" >&2
+        echo "fatal: see error messages above" >&2; exit 2 ;;
+      esac
+    fi
+    exit "$A"
+  fi
+  exec machinectl "$CMD" "$CONAME" "$@"
   MSG=; test -f /etc/debian_version && MSG=", try: sudo apt-get install systemd-container"
   echo "fatal: command machinectl not found$MSG" >&2
 fi
