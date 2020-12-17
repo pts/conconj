@@ -11,6 +11,8 @@ Advantages over systemd-nspawn:
 * conconj works on hosts running an older Linux system, e.g. Debian 8 and Ubuntu 16.06.
 * conconj works around compatibility issues with different versions of systemd, and works equivalently on old and new host operating systems.
 * conconj detects the DNS servers used by the host better, and propagates this info better to the container.
+* conconj starts containers in the background
+* (disadvantage) no easy way to automate conconj container startup at system startup time
 
 Host requirements:
 
@@ -18,16 +20,30 @@ Host requirements:
 * Linux system running systemd. (This is a requirement of systemd-nspawn.)
 * systemd-nspwan. (On Debian/buntu: sudo apt-get install systemd-container) Minimum version which is known to work is systemd 215.
 
-Operating system compatibility on host:
+Operating system compatibility on the host:
 
 * Ubuntu 14.04: It doesn't work. It has package for systemd 204 containing systemd-nspawn, but not machinectl or systemd-run. By default Ubuntu 14.04 uses upstart (rather than systemd or sysvinit), only parts of systemd are installed.
 * Ubuntu 16.04: It works with patch_nspawn.pl for systemd 229.
 * Ubuntu 18.04: It works. It has systemd 237.
 * Ubuntu 20.04: It works. It has systemd 245.4.
 * Debian 7: It doesn't work, because the OS has systemd 44 available, which is too old, and systemd-nspawn doesn't have some important flags (e.g. --bind). By default, systemd isn't even installed, and installing it to Debian 7 is dangerous.
-* Debian 8: It works, with patch_nspawn.pl for systemd 215, Limitations: network doesn't work over wifi (silently drops everything, even packets within host and container, this is because there is no ipvlan support), no shell when the container is already running (use login instead after `... shell ... /usr/bin/passwd root', shell appeared in systemd 224).
+* Debian 8: It works, with patch_nspawn.pl for systemd 215, Limitations: network doesn't work over wifi (silently drops everything, even packets within host and container, this is because there is no ipvlan support), no shell when the container is already running (use login instead), shell appeared in systemd 224).
 * Debian 9: It works, with patch_nspawn.pl for systemd 232.
 * Debian 10: It works. It has systemd 241.
+
+Operating system compatibility in the container:
+
+* Alpine Linux 3.12 (and earlier): It works, but the shell and login commands don't work after the container has been started (because it doesn't have systemd).
+* Ubuntu 14.04: It works, but the stop command is slow in the background (it takes more than 10 seconds for upstart to halt gracefully), and the shell and login command don't work after the container has been started (because systemd 204 is too old).
+* Ubuntu 16.04: It works.
+* Ubuntu 18.04: It works.
+* Ubuntu 20.04: It works.
+* Debian 7: It works, but the stop command is a bit slow (3 seconds) (it takes 3 seconds for sysvinit to halt gracefully), and the shell command doesn't work after the container has been started (because it doesn't have systemd).
+* Debian 8: It works, but the shell command doesn't work after the container has been started (because systemd 215 is too old), use the login command instead.
+* Debian 9: It works.
+* Debian 10: It works.
+
+To use the login command and log in successfully, first you have to set the password for the user root. To do so, stop the container (`conconj stop CONTAINER`), change the password with `conconj shell CONTAINER /usr/bin/passwd root`, then start the container (`conconj start CONTAINER`), and then log in again (`conconj login CONTAINER`).
 
 ## Networking
 
