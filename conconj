@@ -869,6 +869,9 @@ else
   set "$SYSTEMD_NSPAWN" --system-call-filter="add_key keyctl" "$@"
 fi
 
+# This would override $CONAME within the container, so we remove it.
+rm -f "$CONAME".container/rootfs/etc/hostname
+
 if test "$CMD" = start-shell; then
   exec "$@"
   echo "fatal: command not found: $1" >&2
