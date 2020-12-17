@@ -158,8 +158,15 @@ if test "$CMD" != start && test "$CMD" != start-shell; then
     case "$(readlink "$CONAME".container/rootfs/sbin/init)" in
      *systemd*) ;;  # Typically /lib/systemd/systemd .
      *busybox*) CMD=kill; set x -s USR2 --kill-who=leader; shift ;;
-     *) echo "fatal: init system not detected, no way to stop; try: $0 kill $CONAME -s 9" >&2; exit 2
-      ;;  # FYI `machinectl shell "$CONAME" /sbin/shutdown -P' works in sysvinit and upstart (Ubuntu 14.04) as well, but `machinectl shell' and `systemd-run -M' need systemd in the container.
+     *) if test -f "$CONAME".container/rootfs/sbin/initctl; then
+          # We could also detect /sbin/upstart-file-bridge .
+          CMD=kill; set x -s PWR --kill-who=leader; shift
+          # On Ubuntu 14.04, the `Killing all remaining processes...' phase is slow.
+          echo "warning: upstart may need 10 seconds to stop" >&2
+        else
+          echo "fatal: init system not detected, no way to stop; try: $0 kill $CONAME -s 9" >&2; exit 2
+        fi
+        ;;  # FYI `machinectl shell "$CONAME" /sbin/shutdown -P' works in sysvinit and upstart (Ubuntu 14.04) as well, but `machinectl shell' and `systemd-run -M' need systemd in the container.
     esac
   fi
   type machinectl >/dev/null 2>&1 && exec machinectl "$CMD" "$CONAME" "$@"
