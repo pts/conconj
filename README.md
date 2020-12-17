@@ -14,6 +14,63 @@ Advantages over systemd-nspawn:
 * conconj starts containers in the background
 * (disadvantage) no easy way to automate conconj container startup at system startup time
 
+## Tutorial
+
+Download and install stretch (Debian 9) to a container filesystem (rootfs) (it takes a few minutes):
+
+```
+$ ./conconj pts-debootstrap mydeb9 stretch
+...
+```
+
+Start the container:
+
+```
+$ ./conconj start mydeb9
+...
+```
+
+Run a command:
+
+```
+$ ./conconj shell mydeb9 /bin/ping example.org
+Connected to machine mydeb9. Press ^] three times within 1s to exit session.
+PING example.org (93.184.216.34) 56(84) bytes of data.
+64 bytes from 93.184.216.34 (93.184.216.34): icmp_seq=1 ttl=53 time=245 ms
+64 bytes from 93.184.216.34 (93.184.216.34): icmp_seq=3 ttl=53 time=277 ms
+^C
+...
+```
+
+Stop the container:
+
+```
+$ ./conconj stop mydeb9
+...
+```
+
+Similarly, download iand install xenial (Ubuntu 16.04) to a container filesystem (rootfs):
+
+```
+$ ./conconj pts-debootstrap myub164 xenial
+...
+```
+
+Run a command even if the container is not running (also works if the container is Debian above):
+
+```
+$ ./conconj shell myub164 /bin/ping example.org
+Spawning container myub164 on /home/pts/Downloads/conconj/myub164.container/rootfs.
+Press ^] three times within 1s to kill container.
+PING example.org (93.184.216.34) 56(84) bytes of data.
+64 bytes from 93.184.216.34: icmp_seq=1 ttl=53 time=161 ms
+64 bytes from 93.184.216.34: icmp_seq=2 ttl=53 time=134 ms
+^C
+...
+```
+
+## Requirements and compatibility
+
 Host requirements:
 
 * Linux system running a recent amd64 kernel.
