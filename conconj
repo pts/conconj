@@ -151,6 +151,9 @@ case "$CMD:$#" in
     # -sh: can't open /dev/tty: No such device or address
     test "$CMD" = start-shell && set /bin/sh -c 'exec <>/dev/console >&0 2>&0; cd; exec /bin/sh -l'
   fi ;;
+ start-shell:[1-9]*)
+  # Set up networking first, for consistency and apt-get install.
+  set /bin/sh -c 'exec <>/dev/console >&0 2>&0; cd; . /etc/profile; exec "$@"' 0 "$@"
 esac
 if test "$CMD" != start && test "$CMD" != start-shell; then
   if test "$CMD" = stop; then
