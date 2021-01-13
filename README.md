@@ -63,10 +63,17 @@ $ ./conconj stop mydeb9
 ...
 ```
 
-Similarly, download iand install xenial (Ubuntu 16.04) to a container filesystem (rootfs):
+Similarly, download and install xenial (Ubuntu 16.04) to a container filesystem (rootfs):
 
 ```
-$ ./conconj pts-debootstrap myub164 xenial
+$ ./conconj init myub164 ubuntu 16.04
+...
+```
+
+Similarly, download and install the latest Alpine Linux to a container filesystem (rootfs):
+
+```
+$ ./conconj init myalp alpine latest-stable
 ...
 ```
 

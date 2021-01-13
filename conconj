@@ -55,6 +55,8 @@ if test "$1" = start || test "$1" = shell || test "$1" = start-shell || test "$1
     CMD="$1"; CONAME="$3"; IS_WAIT=1; shift; shift; shift
   elif test $# != 1; then
     CMD="$1"; CONAME="$2"; shift; shift
+  elif test "$1" = init; then
+    CMD="$1"; CONAME=""; shift
   fi
   test "$CMD" = poweroff && CMD=stop  # Alias.
 elif test "$1" = list || test "$1" = delnet || test "$1" = daemon || test "$1" = autostart || test "$1" = autostop || test "$1" = install-service; then
@@ -133,30 +135,22 @@ if test "$CMD" = delnet; then
   exit "$A"
 fi
 
-if test "$CMD" != daemon && test "$CMD" != autostart && test "$CMD" != autostop && test "$CMD" != install-service; then
+if test "$CMD" != daemon && test "$CMD" != autostart && test "$CMD" != autostop && test "$CMD" != install-service && test "$CMD" != init; then
   case "$CONAME" in  # Duplicated in daemon.
    -* | *[!-._a-zA-Z0-9]* | "") echo "fatal: bad container name: $CONAME"; exit 1 ;;
   esac
 fi
 
 if test "$CMD" = init; then
-  if test $# != 2; then
+  if test $# != 2 || test "$CONAME" = ""; then
     echo "Usage: $0 $CMD <container-name> <source-type> <release>
 Supported <source-type> values:
 * debian: Example <release>: 9, stretch
 * ubuntu: Example <release>: 18.04, bionic
-* tanglu: Example <release>: 4, dasyatis" >&2
+* tanglu: Example <release>: 4, dasyatis
+* alpine: Example <release>: 3.12, 3.9.2, latest-stable" >&2
     exit 1
   fi
-  case "$1" in
-   debian | Debian | deb) set "debian/$2"; CMD=pts-debootstrap ;;
-   ubuntu | Ubuntu) set "ubuntu/$2"; CMD=pts-debootstrap ;;
-   tanglu | Tanglu) set "tanglu/$2"; CMD=pts-debootstrap ;;
-   *) echo "fatal: unknown <source-type>: $1" >&2; exit 2 ;;
-  esac
-fi
-
-if test "$CMD" = pts-debootstrap; then
   if type wget >/dev/null 2>&1; then
     DOWNLOAD="wget --no-check-certificate -qO-"
   elif type curl >/dev/null 2>&1; then
@@ -165,6 +159,101 @@ if test "$CMD" = pts-debootstrap; then
     echo "fatal: downloader wget or curl not found" >&2
     exit 3
   fi
+  case "$1" in
+   debian | Debian | deb) set "debian/$2"; CMD=pts-debootstrap ;;
+   ubuntu | Ubuntu) set "ubuntu/$2"; CMD=pts-debootstrap ;;
+   tanglu | Tanglu) set "tanglu/$2"; CMD=pts-debootstrap ;;
+   alpine | Alpine)  # Based on __qq_get_alpine_ in https://github.com/pts/pts-chroot-env-qq/blob/92b50750ba16bee5619f5a55fd0fc3986326d31f/pts_chroot_env_qq.sh#L58
+    ARCH=amd64
+    case "$ARCH" in
+     i[3456]86 | x86) ARCH=x86 ;;
+     amd64 | x86_64 | x64) ARCH=x86_64 ;;
+     ppc64el | ppc64le) ARCH=ppc64le ;;
+    esac
+    if test -z "$ARCH"; then
+      echo "fatal: bad architecture" >&2
+      exit 108
+    fi
+
+    # Works with version 3.5, 3.6, 3.7 and 3.8. Special version
+    VERSION="$2"
+    DIR="$CONAME.container/rootfs"
+    # TODO(pts): Avoid code duplication.
+    test -d "$CONAME".container || mkdir "$CONAME".container || exit 2
+    if test -d "$CONAME".container/rootfs; then
+      echo "fatal: container rootfs directory already exists, not clobbering: $CONAME.container/rootfs" >&2
+      exit 2
+    fi
+    # `shared' is the easiest to set up, doesn't need IP addresses or iptables(8).
+    test -f "$CONAME".container/ipaddr || echo shared >"$CONAME".container/ipaddr || exit 2
+    echo "info: downloading and installing distro to: $CONAME.container/rootfs" >&2
+
+    test "${DIR#/}" = "$DIR" && DIR="./$DIR"
+    if test -d "$DIR"; then
+      echo "fatal: target directory already exists, not clobbering: $DIR" >&2
+      exit 100
+    fi
+    rm  -rf "$DIR.get" 2>/dev/null
+    test -d "$DIR.get" && rm -rf "$DIR.get"
+    if ! mkdir -p "$DIR.get/alpine.dir"; then
+      echo "fatal: mkdir failed" >&2
+      exit 109
+    fi
+    if test "${VERSION#*.*.*}" != "$VERSION"; then
+      VERSION="${VERSION#v}"
+      VERSION_SUFFIX="${VERSION#*.*.}"
+      VERSION_PREFIX="${VERSION%.$VERSION_SUFFIX}"  # 3.8 remains.
+      URL="http://dl-cdn.alpinelinux.org/alpine/v$VERSION_PREFIX/releases/$ARCH/alpine-minirootfs-$VERSION-$ARCH.tar.gz"
+      VERSION="v$VERSION"
+    else
+      test "${VERSION#[0-9]}" = "$VERSION" || VERSION="v$VERSION"
+      URL="http://dl-cdn.alpinelinux.org/alpine/$VERSION/releases/$ARCH/"
+      if wget -qO "$DIR.get/alpine.html" "$URL" && test -s "$DIR.get/alpine.html"; then
+        :
+      else
+        echo "fatal: error downloading URL: $URL" >&2
+        rm -rf "$DIR.get"
+        exit 101
+      fi
+      FILENAME="$(<"$DIR.get"/alpine.html awk -F'"' '$2~/^alpine-minirootfs-.*[.]tar[.]gz$/&&$2!~/[0-9]_rc[0-9]/{print$2}' | sort | tail -1)"  #'
+      if test -z "$FILENAME"; then
+        echo "fatal: missing alpine-minirootfs-*.tar.gz in: $URL" >&2
+        rm -rf "$DIR.get"
+        exit 102
+      fi
+      URL="http://dl-cdn.alpinelinux.org/alpine/$VERSION/releases/$ARCH/$FILENAME"
+    fi
+    echo "info: downloading: $URL" >&2
+    if $DOWNLOAD >"$DIR.get/alpine.tar.gz" "$URL" && test -s "$DIR.get/alpine.tar.gz"; then
+      :
+    else
+      echo "fatal: error downloading URL: $URL" >&2
+      exit 103
+    fi
+    # tar in Debian slink (1999-03) supports --numeric-owner, but busybox tar doesn't.
+    if ! (cd "$DIR.get" &&
+          (cd alpine.dir && tar --numeric-owner -xzf ../alpine.tar.gz) &&
+          chmod 755 alpine.dir &&
+          mv alpine.dir/* ./ &&
+          rmdir alpine.dir &&
+          rm -f alpine.tar.gz alpine.html); then
+      echo "fatal: error extracting $DIR.get/alpine.tar.gz" >&2
+      rm  -rf "$DIR.get" 2>/dev/null
+      test -d "$DIR.get" && rm -rf "$DIR.get"
+      exit 104
+    fi
+    # TODO(pts): Use staticperl instead, it uses much less disk.
+    if ! mv "$DIR".get "$DIR"; then
+      echo "fatal: rename failed from: $DIR.get" >&2
+      exit 105
+    fi
+    exit
+    ;;
+   *) echo "fatal: unknown <source-type>: $1" >&2; exit 2 ;;
+  esac
+fi
+
+if test "$CMD" = pts-debootstrap; then
   for F in pts-debootstrap; do
     if ! test -f "$F"; then
       BASE_URL=https://raw.githubusercontent.com/pts/pts-debootstrap/master
@@ -187,6 +276,7 @@ if test "$CMD" = pts-debootstrap; then
   # `shared' is the easiest to set up, doesn't need IP addresses or iptables(8).
   test -f "$CONAME".container/ipaddr || echo shared >"$CONAME".container/ipaddr || exit 2
   echo "info: downloading and installing distro to: $CONAME.container/rootfs" >&2
+  # Uses $DOWNLOAD and $BASE_URL.
   exec ./pts-debootstrap --include=dbus --arch amd64 "$@" "$CONAME".container/rootfs; exit 2
 fi
 
