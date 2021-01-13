@@ -57,7 +57,7 @@ if test "$1" = start || test "$1" = shell || test "$1" = start-shell || test "$1
     CMD="$1"; CONAME="$2"; shift; shift
   fi
   test "$CMD" = poweroff && CMD=stop  # Alias.
-elif test "$1" = list || test "$1" = delnet; then
+elif test "$1" = list || test "$1" = delnet || test "$1" = daemon || test "$1" = autostart || test "$1" = autostop; then
   CMD="$1"; shift
 elif test $# = 1 && test "${1#-}" = "$1"; then
   CMD=start; CONAME="$1"; shift
@@ -78,6 +78,9 @@ Usage: $0 [start [-q]] <container-name>
        $0 login <container-name>
        $0 list  # List active containers.
        $0 pts-debootstrap <container-name> [<arg> ...] <debian-dist>  # Create new container rootfs with Debian, Ubuntu etc.
+       $0 autostart   # Start all autostart containers.
+       $0 autostop   # Stop all autostart containers.
+       $0 daemon  # Run dameon, starting all autostart containers. Used by host systemd.
        $0 delnet  # Delete network interfaces and rules." >&2
   exit 1
 fi
@@ -128,9 +131,11 @@ if test "$CMD" = delnet; then
   exit "$A"
 fi
 
-case "$CONAME" in
- -* | *[!-._a-zA-Z0-9]* | "") echo "fatal: bad container name: $CONAME"; exit 1 ;;
-esac
+if test "$CMD" != daemon && test "$CMD" != autostart && test "$CMD" != autostop; then
+  case "$CONAME" in  # Duplicated in daemon.
+   -* | *[!-._a-zA-Z0-9]* | "") echo "fatal: bad container name: $CONAME"; exit 1 ;;
+  esac
+fi
 
 if test "$CMD" = pts-debootstrap; then
   if type wget >/dev/null 2>&1; then
@@ -199,7 +204,7 @@ case "$CMD:$#" in
   # Set up networking first, for consistency and apt-get install.
   set /bin/sh -c 'exec <>/dev/console >&0 2>&0; cd; . /etc/profile; exec "$@"' 0 "$@"
 esac
-if test "$CMD" != start && test "$CMD" != start-shell; then
+if test "$CMD" != start && test "$CMD" != start-shell && test "$CMD" != daemon && test "$CMD" != autostart && test "$CMD" != autostop; then
   if ! type machinectl >/dev/null 2>&1; then
     MSG=; test -f /etc/debian_version && MSG=", try: sudo apt-get install systemd-container"
     echo "fatal: command machinectl not found$MSG" >&2
@@ -303,7 +308,6 @@ if test "$CMD" != start && test "$CMD" != start-shell; then
   echo "fatal: command machinectl not found$MSG" >&2
   exit 2
 fi
-set x -- "$@"; shift
 
 if ! systemd-nspawn --version >/dev/null 2>&1; then
   # TODO(pts): On older systems (e.g. Debian 7), it's apt-get install systemd.
@@ -315,18 +319,106 @@ if ! test -f "busybox.conconj" || ! test -x "busybox.conconj"; then
   echo "fatal: executable not found: $CODIR/busybox.conconj"
   exit 2
 fi
+export PERL_BADLANG=x  # Unnecessary, because LC_* is unset.
+if ! perl -e0 2>/dev/null; then
+  MSG=; test -f /etc/debian_version && MSG=", try: sudo apt-get install perl-base"
+  echo "fatal: command perl doesn't work$MSG" >&2
+  exit 2
+fi
+
+if test "$CMD" = daemon || test "$CMD" = autostart || test "$CMD" = autostop; then
+  if test "$CMD" = daemon; then
+    trap '' TERM INT QUIT
+  fi
+  CCMD="./${0##*/}"
+  if ! test -f "$CCMD" || ! test -x "$CCMD"; then
+    echo "fatal: missing conconj executable: $CCMD" >&2
+    exit 2
+  fi
+  if test "$CMD" = autostart || test "$CMD" = daemon; then
+    A="$(for D in *.container; do
+      CONAME="${D%.*}"
+      case "$CONAME" in  # Duplicated below.
+       -* | *[!-._a-zA-Z0-9]* | "") ;;
+       *) test -f "$D"/autostart && test -d "$D/rootfs" && test -f "$D/ipaddr" && echo "$CONAME"
+      esac
+    done)"
+    if test -z "$A"; then
+      echo "info: no autostart containers found in: $CODIR" >&2
+      exit 2
+    fi
+    A="$(echo "$A" | LC_ALL=C sort)"
+    if test -z "$A"; then
+      echo "fatal: no autostart containers found after sorting in: $CODIR" >&2
+      exit 2
+    fi
+    (set x $A; shift; echo "info: daemon will start containers: $*" >&2)
+    # !! TODO(pts): Add install command.
+    # !! TODO(pts): Wait for network first.
+    CONAMES="$A"; CONT=1
+    trap CONT= TERM INT QUIT
+    for CONAME in $CONAMES; do
+      test "$CONT" || break
+      if machinectl show "$CONAME" 2>/dev/null >&2; then
+        echo "info: container already running: $CONAME" >&2
+      else
+        echo "info: starting container: $CONAME" >&2
+        if ! "$CCMD" start -q "$CONAME"; then
+          echo "error: container start failed: $CONAME" >&2
+        fi
+      fi
+    done
+  fi
+  if test "$CMD" = daemon && test "$CONT"; then
+    echo "info: waiting indefinitely for signal (TERM etc.)" >&2
+    # %% is the perl -e sleep... process. We kill it explicitly in case
+    # %% systemd has sent only us (conconj shell script) the TERM signal.
+    trap 'CONT=; kill -TERM %% 2>/dev/null' TERM INT QUIT
+    while test "$CONT"; do
+      perl -e 'sleep if $ARGV[0]' "$CONT" &
+      test "$CONT" || kill -TERM %% 2>/dev/null
+      wait
+    done
+  fi
+  if test "$CMD" = daemon; then
+    trap '' TERM INT QUIT
+    echo "info: stopping containers before exiting" >&2
+  fi
+  if test "$CMD" = autostop || test "$CMD" = daemon; then
+    CONAMES="$(for D in *.container; do
+      CONAME="${D%.*}"
+      case "$CONAME" in  # Duplicated below.
+       -* | *[!-._a-zA-Z0-9]* | "") ;;
+       *) test -f "$D"/autostart && test -d "$D/rootfs" && test -f "$D/ipaddr" && echo "$CONAME"
+      esac
+    done | LC_ALL=C sort -r)"
+    (set x $CONAMES; shift; echo "info: will stop containers: $*" >&2)
+    machinectl stop alp
+    for CONAME in $CONAMES; do
+      if machinectl show "$CONAME" 2>/dev/null >&2; then
+        echo "info: stopping container: $CONAME" >&2
+        # TODO(pts): Wait concurrently for containers to stop. Is this a good idea?
+        if ! "$CCMD" stop -w "$CONAME"; then
+          echo "error: container stop failed: $CONAME" >&2
+        fi
+      else
+        echo "info: container not running: $CONAME" >&2
+      fi
+    done
+  fi
+  if test "$CMD" = daemon; then
+    echo "info: daemon exiting" >&2
+  fi
+  exit
+fi
+
+set x -- "$@"; shift
 if ! test -d "$CONAME.container/rootfs"; then
   echo "fatal: missing rootfs directory in container: $CODIR/$CONAME.container/rootfs"
   exit 2
 fi
 if ! test -f "$CONAME.container/rootfs/bin/sh"; then
   echo "fatal: missing shell in container: $CODIR/$CONAME.container/rootfs/bin/sh"
-  exit 2
-fi
-export PERL_BADLANG=x  # Unnecessary, because LC_* is unset.
-if ! perl -e0 2>/dev/null; then
-  MSG=; test -f /etc/debian_version && MSG=", try: sudo apt-get install perl-base"
-  echo "fatal: command perl doesn't work$MSG" >&2
   exit 2
 fi
 CONIP=
