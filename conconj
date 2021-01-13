@@ -381,13 +381,13 @@ if test "$CMD" = daemon || test "$CMD" = autostart || test "$CMD" = autostop; th
          1) S=2 ;; 2) S=4 ;; 4) S=8 ;; 8) S=16 ;; 16) S=32 ;; 32) S=64 ;;
         esac
         if test "$CMD" = daemon; then
-          # %% is the perl -e sleep... process. We kill it explicitly in case
-          # %% systemd has sent only us (conconj shell script) the TERM signal.
-          trap 'CONT=; kill -TERM %% 2>/dev/null' TERM INT QUIT
+          SLEEP_PID=
+          trap 'CONT=; kill -TERM "$SLEEP_PID" 2>/dev/null' TERM INT QUIT
           if test "$CONT"; then
             perl -e 'sleep $ARGV[1] if $ARGV[0]' "$CONT" "$S" &
-            test "$CONT" || kill -TERM %% 2>/dev/null
-            wait
+            SLEEP_PID=$!
+            test "$CONT" || kill -TERM "$SLEEP_PID" 2>/dev/null
+            wait "$SLEEP_PID"
           fi
         else
           perl -e 'sleep $ARGV[0]' "$S"
@@ -410,13 +410,15 @@ if test "$CMD" = daemon || test "$CMD" = autostart || test "$CMD" = autostop; th
   fi
   if test "$CMD" = daemon && test "$CONT"; then
     echo "info: waiting indefinitely for signal (TERM etc.)" >&2
-    # %% is the perl -e sleep... process. We kill it explicitly in case
-    # %% systemd has sent only us (conconj shell script) the TERM signal.
-    trap 'CONT=; kill -TERM %% 2>/dev/null' TERM INT QUIT
+    # We kill "$SLEEP_PID" explicitly in case
+    # systemd has sent only us (conconj shell script) the TERM signal.
+    SLEEP_PID=
+    trap 'CONT=; kill -TERM "$SLEEP_PID" 2>/dev/null' TERM INT QUIT
     while test "$CONT"; do
       perl -e 'sleep if $ARGV[0]' "$CONT" &
-      test "$CONT" || kill -TERM %% 2>/dev/null
-      wait
+      SLEEP_PID=$!
+      test "$CONT" || kill -TERM "$SLEEP_PID" 2>/dev/null
+      wait "$SLEEP_PID"
     done
   fi
   if test "$CMD" = daemon; then
