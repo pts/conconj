@@ -352,8 +352,11 @@ if test "$CMD" = daemon || test "$CMD" = autostart || test "$CMD" = autostop; th
       echo "fatal: no autostart containers found after sorting in: $CODIR" >&2
       exit 2
     fi
-    (set x $A; shift; echo "info: daemon will start containers: $*" >&2)
-    # !! TODO(pts): Add install command.
+    if test "$CMD" = daemon; then
+      (set x $A; shift; echo "info: daemon will start containers: $*" >&2)
+    else
+      (set x $A; shift; echo "info: will start containers: $*" >&2)
+    fi
     CONAMES="$A"; CONT=1
     trap CONT= TERM INT QUIT
     HOSTNETIP=
