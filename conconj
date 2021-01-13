@@ -45,9 +45,14 @@ fi
 
 CMD=
 IS_QUIET=
+IS_WAIT=
 if test "$1" = start || test "$1" = shell || test "$1" = start-shell || test "$1" = login || test "$1" = poweroff ||  test "$1" = stop || test "$1" = kill || test "$1" = pts-debootstrap || test "$1" = show; then
   if test "$1" = start && test "$2" = -q && test $# != 2; then
     CMD="$1"; CONAME="$3"; IS_QUIET=1; shift; shift; shift
+  elif test "$1" = stop && test "$2" = -w && test $# != 2; then
+    CMD="$1"; CONAME="$3"; IS_WAIT=1; shift; shift; shift
+  elif test "$1" = poweroff && test "$2" = -w && test $# != 2; then
+    CMD="$1"; CONAME="$3"; IS_WAIT=1; shift; shift; shift
   elif test $# != 1; then
     CMD="$1"; CONAME="$2"; shift; shift
   fi
@@ -67,7 +72,7 @@ Usage: $0 [start [-q]] <container-name>
        $0 shell <container-name>  # Root shell.
        $0 start-shell <container-name>  # Start, run root shell as PID 1.
        $0 show <container-name>
-       $0 stop <container-name>  # Gracefully, but don't wait for shutdown.
+       $0 stop [-w] <container-name>  # Gracefully, but don't wait for shutdown.
        $0 kill <container-name> [<arg> ...]
        $0 kill <container-name> -s 9  # Force kill (SIGKILL) all processes.
        $0 login <container-name>
@@ -195,7 +200,14 @@ case "$CMD:$#" in
   set /bin/sh -c 'exec <>/dev/console >&0 2>&0; cd; . /etc/profile; exec "$@"' 0 "$@"
 esac
 if test "$CMD" != start && test "$CMD" != start-shell; then
+  if ! type machinectl >/dev/null 2>&1; then
+    MSG=; test -f /etc/debian_version && MSG=", try: sudo apt-get install systemd-container"
+    echo "fatal: command machinectl not found$MSG" >&2
+    exit 2
+  fi
+  IS_STOP_WAIT=
   if test "$CMD" = stop; then
+    test "$IS_WAIT" && IS_STOP_WAIT=1
     case "$(readlink "$CONAME".container/rootfs/sbin/init)" in
      *systemd*) ;;  # Typically /lib/systemd/systemd .
      *busybox*) CMD=kill; set x -s USR2 --kill-who=leader; shift ;;
@@ -257,6 +269,34 @@ if test "$CMD" != start && test "$CMD" != start-shell; then
       esac
     fi
     exit "$A"
+  fi
+  if test "$IS_STOP_WAIT"; then
+    machinectl "$CMD" "$CONAME" "$@" || exit 2
+    if test -f "$CONAME.container/console.out"; then
+      B="Container $CONAME has been shut down."  # Written by systemd-nspawn.
+      #while (while read A; do test "$A" = "$B" && exit 1; done <"$CONAME.container/console.out"; exit 0); do
+      #  sleep .2
+      #done
+      perl -we '
+          #use integer; # For $s.
+          use strict;
+          my $b = "$ARGV[1]\n"; my $fn = $ARGV[0];
+          my $c = $ARGV[3] + 0; my $s = $ARGV[2] + 0;
+          for (; $c > 0; --$c) {
+            my $f; last if !open($f, "<", $fn);
+            while (<$f>) { if ($_ eq $b) { $c = undef; last } }
+            close($f);
+            last if !defined($c);
+            select(undef, undef, undef, $s);  # Fractional sleep($s).
+          }
+          exit(2) if defined($c);  # Timeout reached.
+          ' "$CONAME.container/console.out" "$B" .2 100  # Timeout: 20 seconds.
+      if test $? != 0; then
+        echo "fatal: container failed to stop gracefully" >&2
+        exit 2
+      fi
+    fi
+    exit 0
   fi
   exec machinectl "$CMD" "$CONAME" "$@"
   MSG=; test -f /etc/debian_version && MSG=", try: sudo apt-get install systemd-container"
