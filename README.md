@@ -82,6 +82,26 @@ PING example.org (93.184.216.34) 56(84) bytes of data.
 ...
 ```
 
+Enable autostart for the container:
+
+```
+$ : >mydeb9.container/autostart
+```
+
+Start all autostart containers:
+
+```
+$ ./conconj autostart
+info: will start containers: mydeb9
+info: starting container: mydeb9
+```
+
+Install conconj service, so that autostart containers will be started at host system startup:
+
+```
+$ ./conconj install-service
+```
+
 ## Requirements and compatibility
 
 Host requirements:

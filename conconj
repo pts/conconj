@@ -57,7 +57,7 @@ if test "$1" = start || test "$1" = shell || test "$1" = start-shell || test "$1
     CMD="$1"; CONAME="$2"; shift; shift
   fi
   test "$CMD" = poweroff && CMD=stop  # Alias.
-elif test "$1" = list || test "$1" = delnet || test "$1" = daemon || test "$1" = autostart || test "$1" = autostop; then
+elif test "$1" = list || test "$1" = delnet || test "$1" = daemon || test "$1" = autostart || test "$1" = autostop || test "$1" = install-service; then
   CMD="$1"; shift
 elif test $# = 1 && test "${1#-}" = "$1"; then
   CMD=start; CONAME="$1"; shift
@@ -81,6 +81,7 @@ Usage: $0 [start [-q]] <container-name>
        $0 autostart   # Start all autostart containers.
        $0 autostop   # Stop all autostart containers.
        $0 daemon  # Run dameon, starting all autostart containers. Used by host systemd.
+       $0 install-service  # Install and enable conconj.service on host, start daemon on host startup.
        $0 delnet  # Delete network interfaces and rules." >&2
   exit 1
 fi
@@ -131,7 +132,7 @@ if test "$CMD" = delnet; then
   exit "$A"
 fi
 
-if test "$CMD" != daemon && test "$CMD" != autostart && test "$CMD" != autostop; then
+if test "$CMD" != daemon && test "$CMD" != autostart && test "$CMD" != autostop && test "$CMD" != install-service; then
   case "$CONAME" in  # Duplicated in daemon.
    -* | *[!-._a-zA-Z0-9]* | "") echo "fatal: bad container name: $CONAME"; exit 1 ;;
   esac
@@ -204,7 +205,7 @@ case "$CMD:$#" in
   # Set up networking first, for consistency and apt-get install.
   set /bin/sh -c 'exec <>/dev/console >&0 2>&0; cd; . /etc/profile; exec "$@"' 0 "$@"
 esac
-if test "$CMD" != start && test "$CMD" != start-shell && test "$CMD" != daemon && test "$CMD" != autostart && test "$CMD" != autostop; then
+if test "$CMD" != start && test "$CMD" != start-shell && test "$CMD" != daemon && test "$CMD" != autostart && test "$CMD" != autostop && test "$CMD" != install-service; then
   if ! type machinectl >/dev/null 2>&1; then
     MSG=; test -f /etc/debian_version && MSG=", try: sudo apt-get install systemd-container"
     echo "fatal: command machinectl not found$MSG" >&2
@@ -324,6 +325,43 @@ if ! perl -e0 2>/dev/null; then
   MSG=; test -f /etc/debian_version && MSG=", try: sudo apt-get install perl-base"
   echo "fatal: command perl doesn't work$MSG" >&2
   exit 2
+fi
+
+if test "$CMD" = install-service; then
+  CODIRA="$(pwd)"
+  if test -z "$CODIRA"; then
+    echo "fatal: error getting current directory" >&2
+    exit 2
+  fi
+  CCMD="./${0##*/}"
+  if ! test -f "$CCMD" || ! test -x "$CCMD"; then
+    echo "fatal: missing conconj executable: $CCMD" >&2
+    exit 2
+  fi
+  CMD="$CODIRA/${CCMD##*/}"
+  # For ``Command Lines'' in https://www.freedesktop.org/software/systemd/man/systemd.service.html
+  case "$CMD" in *[\\\']*) echo "fatal: bad conconj executable syntax: $CMD" >&2; exit 2 ;; esac
+  echo "# Installed by '$CMD' install-service
+[Unit]
+Description=Container Conjurer containers
+# Alternatively, this could be network-online.service .
+After=network.target
+
+[Service]
+ExecStart='$CMD' daemon
+ExecReload='$CMD' autostart
+KillMode=process
+Type=simple
+
+[Install]
+WantedBy=multi-user.target
+Alias=conconj.service
+" >/etc/systemd/system/conconj.service || exit 2
+  rm -f /etc/systemd/system/multi-user.target.wants/conconj.service || exit 2
+  ln -s /etc/systemd/system/conconj.service /etc/systemd/system/multi-user.target.wants/conconj.service || exit 2
+  systemctl daemon-reload || exit 2
+  echo "info: service installed and enabled: /etc/systemd/system/conconj.service" >&2
+  exit
 fi
 
 if test "$CMD" = daemon || test "$CMD" = autostart || test "$CMD" = autostop; then
