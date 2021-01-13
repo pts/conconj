@@ -258,6 +258,7 @@ if test "$CMD" != start && test "$CMD" != start-shell; then
   exec machinectl "$CMD" "$CONAME" "$@"
   MSG=; test -f /etc/debian_version && MSG=", try: sudo apt-get install systemd-container"
   echo "fatal: command machinectl not found$MSG" >&2
+  exit 2
 fi
 set x -- "$@"; shift
 
