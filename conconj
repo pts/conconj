@@ -44,8 +44,11 @@ if test -z "$CONCONJ_RERUN" && ! (test $# = 0 || test "$1" = --help); then
 fi
 
 CMD=
+IS_QUIET=
 if test "$1" = start || test "$1" = shell || test "$1" = start-shell || test "$1" = login || test "$1" = poweroff ||  test "$1" = stop || test "$1" = kill || test "$1" = pts-debootstrap || test "$1" = show; then
-  if test $# != 1; then
+  if test "$1" = start && test "$2" = -q && test $# != 2; then
+    CMD="$1"; CONAME="$3"; IS_QUIET=1; shift; shift; shift
+  elif test $# != 1; then
     CMD="$1"; CONAME="$2"; shift; shift
   fi
   test "$CMD" = poweroff && CMD=stop  # Alias.
@@ -60,7 +63,7 @@ fi
 if ! test "$CMD"; then
   echo "\
 $0: Container Conjurer (conconj)
-Usage: $0 [start] <container-name>
+Usage: $0 [start [-q]] <container-name>
        $0 shell <container-name>  # Root shell.
        $0 start-shell <container-name>  # Start, run root shell as PID 1.
        $0 show <container-name>
@@ -1013,10 +1016,12 @@ if test "$E"; then
 fi
 mv "$CONAME".container/console.out.tmp "$CONAME".container/console.out
 
+if test -z "$IS_QUIET"; then
+  echo "info: started; shutdown gracefully: $0 stop $CONAME" >&2
+  echo "info: force kill: $0 kill $CONAME -s 9" >&2
+  echo "info: view console: less '$CODIR/$CONAME.container/console.out'" >&2
+  echo "info: root shell: $0 shell $CONAME" >&2
+fi
 # Perhaps it's too early (race condition) for stop or shell now.
-echo "info: started; shutdown gracefully: $0 stop $CONAME" >&2
-echo "info: force kill: $0 kill $CONAME -s 9" >&2
-echo "info: view console: less '$CODIR/$CONAME.container/console.out'" >&2
-echo "info: root shell: $0 shell $CONAME" >&2
 
 exit 0
