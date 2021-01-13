@@ -46,7 +46,7 @@ fi
 CMD=
 IS_QUIET=
 IS_WAIT=
-if test "$1" = start || test "$1" = shell || test "$1" = start-shell || test "$1" = login || test "$1" = poweroff ||  test "$1" = stop || test "$1" = kill || test "$1" = pts-debootstrap || test "$1" = show; then
+if test "$1" = start || test "$1" = shell || test "$1" = start-shell || test "$1" = login || test "$1" = poweroff ||  test "$1" = stop || test "$1" = kill || test "$1" = pts-debootstrap || test "$1" = init || test "$1" = show; then
   if test "$1" = start && test "$2" = -q && test $# != 2; then
     CMD="$1"; CONAME="$3"; IS_QUIET=1; shift; shift; shift
   elif test "$1" = stop && test "$2" = -w && test $# != 2; then
@@ -77,7 +77,8 @@ Usage: $0 [start [-q]] <container-name>
        $0 kill <container-name> -s 9  # Force kill (SIGKILL) all processes.
        $0 login <container-name>
        $0 list  # List active containers.
-       $0 pts-debootstrap <container-name> [<arg> ...] <debian-dist>  # Create new container rootfs with Debian, Ubuntu etc.
+       $0 init <container-name> <source-type> <release>
+       $0 pts-debootstrap <container-name> [<arg> ...] <release>  # Create new container rootfs with Debian, Ubuntu, Tanglu etc.
        $0 autostart   # Start all autostart containers.
        $0 autostop   # Stop all autostart containers.
        $0 daemon  # Run dameon, starting all autostart containers. Used by host systemd.
@@ -135,6 +136,23 @@ fi
 if test "$CMD" != daemon && test "$CMD" != autostart && test "$CMD" != autostop && test "$CMD" != install-service; then
   case "$CONAME" in  # Duplicated in daemon.
    -* | *[!-._a-zA-Z0-9]* | "") echo "fatal: bad container name: $CONAME"; exit 1 ;;
+  esac
+fi
+
+if test "$CMD" = init; then
+  if test $# != 2; then
+    echo "Usage: $0 $CMD <container-name> <source-type> <release>
+Supported <source-type> values:
+* debian: Example <release>: 9, stretch
+* ubuntu: Example <release>: 18.04, bionic
+* tanglu: Example <release>: 4, dasyatis" >&2
+    exit 1
+  fi
+  case "$1" in
+   debian | Debian | deb) set "debian/$2"; CMD=pts-debootstrap ;;
+   ubuntu | Ubuntu) set "ubuntu/$2"; CMD=pts-debootstrap ;;
+   tanglu | Tanglu) set "tanglu/$2"; CMD=pts-debootstrap ;;
+   *) echo "fatal: unknown <source-type>: $1" >&2; exit 2 ;;
   esac
 fi
 

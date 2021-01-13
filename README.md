@@ -12,6 +12,7 @@ Advantages over systemd-nspawn:
 * conconj works around compatibility issues with different versions of systemd, and works equivalently on old and new host operating systems.
 * conconj detects the DNS servers used by the host better, and propagates this info better to the container.
 * conconj starts containers in the background
+* conconj can conveniently initialize a container by downloading a release of a Linux distribution
 * (disadvantage) no easy way to automate conconj container startup at system startup time
 
 ## Tutorial
@@ -29,10 +30,10 @@ $ ./conconj
 ...
 ```
 
-Download and install stretch (Debian 9) to a container filesystem (rootfs) (it takes a few minutes):
+Download and install Debian 9 to a container filesystem (rootfs) (it takes a few minutes, it uses [pts-debootstrap](https://github.com/pts/pts-debootstrap) to download packages):
 
 ```
-$ ./conconj pts-debootstrap mydeb9 stretch
+$ ./conconj init mydeb9 debian 9
 ...
 ```
 
