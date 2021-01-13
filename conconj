@@ -1031,7 +1031,12 @@ if test -f "$CONAME".container/rootfs/etc/inittab; then
 fi
 
 exec 9>"$CONAME".container/console.out.tmp </dev/null
-"$@" >&9 2>&9 &  # This generates some shell-specific command-not-found error.
+# Using setpgrp to prevent a subsequent Ctrl-<C> on the terminal from
+# sending the INT signal to systemd-nspawn(1), causing it to stop the
+# container gracefully.
+#
+# Instead of setpgrp, setsid(1) would also work. nohup(1) doesn't work.
+perl -e 'setpgrp; exec @ARGV; die "exec: $ARGV[0]: $!\n"' "$@" >&9 2>&9 &  # This generates some shell-specific command-not-found error.
 exec 9>&2
 while ! read LINE <"$CONAME".container/console.out.tmp; do :; done
 E=
